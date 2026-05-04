@@ -41,13 +41,14 @@ latest_scan = {"seen": False, "stamp": 0.0, "range_min": 0.0, "range_max": 0.0, 
 latest_scan_points = []
 latest_forward_obstacle = {
     "blocked": False,
+    "caution": False,
     "stop_active": False,
     "min_distance": None,
     "box_min_distance": None,
-    "stop_distance": 0.40,
-    "clear_distance": 0.65,
+    "stop_distance": 0.35,
+    "clear_distance": 0.55,
     "half_angle_deg": 18.0,
-    "safety_box": {"front": 0.50, "rear": 0.05, "half_width": 0.30},
+    "safety_box": {"front": 0.50, "rear": 0.02, "half_width": 0.30, "stop_distance": 0.35},
 }
 latest_live_map = None
 latest_goal_distance = None
@@ -78,12 +79,13 @@ MAP_INFO = {
     "width": 453,
     "height": 430,
 }
-FRONT_STOP_DISTANCE = 0.40
-FRONT_CLEAR_DISTANCE = 0.65
+FRONT_STOP_DISTANCE = 0.35
+FRONT_CLEAR_DISTANCE = 0.55
 FRONT_STOP_HALF_ANGLE = math.radians(18)
 SAFETY_BOX_FRONT = 0.50
-SAFETY_BOX_REAR = 0.05
+SAFETY_BOX_REAR = 0.02
 SAFETY_BOX_HALF_WIDTH = 0.30
+SAFETY_BOX_STOP_DISTANCE = 0.35
 BATTERY_STALE_SECONDS = 10.0
 
 rospy.init_node("web_panel_server", anonymous=True, disable_signals=True)
@@ -176,12 +178,12 @@ def scan_cb(msg):
             })
         angle += msg.angle_increment
     latest_scan_points = points
-    if was_blocked:
-        blocked = (front_min is not None and front_min < FRONT_CLEAR_DISTANCE) or box_min is not None
-    else:
-        blocked = (front_min is not None and front_min < FRONT_STOP_DISTANCE) or box_min is not None
+    front_blocked = front_min is not None and front_min < (FRONT_CLEAR_DISTANCE if was_blocked else FRONT_STOP_DISTANCE)
+    box_blocked = box_min is not None and box_min < (FRONT_CLEAR_DISTANCE if was_blocked else SAFETY_BOX_STOP_DISTANCE)
+    blocked = front_blocked or box_blocked
     latest_forward_obstacle = {
         "blocked": blocked,
+        "caution": (front_min is not None and front_min < 0.8) or box_min is not None,
         "stop_active": blocked,
         "min_distance": front_min,
         "box_min_distance": box_min,
@@ -192,6 +194,7 @@ def scan_cb(msg):
             "front": SAFETY_BOX_FRONT,
             "rear": SAFETY_BOX_REAR,
             "half_width": SAFETY_BOX_HALF_WIDTH,
+            "stop_distance": SAFETY_BOX_STOP_DISTANCE,
         },
     }
     latest_scan = {

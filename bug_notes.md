@@ -2410,3 +2410,46 @@ half_width = 0.30m
 ### 限制
 
 如果物体完全不在雷达扫描平面内，软件无法凭 `/scan` 看到它。此类场景需要降低速度、扩大安全距离，或者增加低位/深度传感器/物理防撞条。
+
+---
+
+## 40. Resume Nav 立刻回到 Manual
+
+### 问题
+
+点击 `Resume Nav` 后不到 1 秒，Mode 又变成 `Manual`，设置目标后小车不动。
+
+### 原因
+
+Web 前方安全盒过于激进：只要安全盒里存在任意雷达点，就把 `blocked=true`。实测状态：
+
+```text
+box_min_distance = 0.516m
+min_distance = 0.609m
+blocked = true
+```
+
+这类距离不应该直接急停，只应该提示谨慎。安全线程看到 `blocked=true` 后会取消导航并切回手动模式，所以表现为 Resume 立刻失效。
+
+### 修复
+
+安全逻辑改为两级：
+
+- `caution=true`：前方或安全盒内有障碍提示，但不取消导航；
+- `blocked=true`：只有低于急停距离才取消导航并切回手动。
+
+当前阈值：
+
+```text
+front stop < 0.35m
+front clear > 0.55m
+safety box stop < 0.35m
+```
+
+验证：同样 `box_min_distance ~= 0.516m` 时，状态变为：
+
+```text
+caution = true
+blocked = false
+manual_mode = false
+```

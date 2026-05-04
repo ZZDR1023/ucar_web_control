@@ -1353,6 +1353,7 @@ http://10.90.122.179:8080
 - 控制面板现在是单页布局：手动控制、Map、Camera、Log 同屏显示，Camera 会自动实时刷新。
 - 为减少碰撞，Web 启动时会将 DWA 导航速度限制到 `0.18m/s`，并把 local/global costmap inflation 调到 `0.35m`。
 - Web 急停层有前方安全盒：`front=0.50m`、`half_width=0.30m`；如果行李箱等物体不在雷达扫描平面内，仍需要人工降低风险。
+- 前方安全状态分两级：`caution=true` 只提示，`blocked=true` 才会取消导航并切回 Manual；当前急停阈值为 `0.35m`。
 - 顶部和 Status 卡片会显示 `/battery_state` 电量；低于 20% 变红，10 秒没有新数据会显示 `stale`，完全没有话题则显示 `Battery no data`。
 
 ### 8. x11vnc 断线后的恢复
