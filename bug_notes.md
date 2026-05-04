@@ -2453,3 +2453,124 @@ caution = true
 blocked = false
 manual_mode = false
 ```
+
+---
+
+## 41. Camera 轮询导致刷新慢、请求堆积
+
+### 问题
+
+前端 Camera 需要点击 `Refresh` 才更新，或每隔一段时间请求 `/api/camera`，浏览器 Network 中会出现大量图片请求。
+
+### 原因
+
+旧逻辑每次刷新都会重新打开一次摄像头、读取一帧、关闭设备。摄像头初始化本身较慢，多个请求堆积时会影响 Web 面板响应。
+
+### 修复
+
+后端新增：
+
+```text
+/api/camera_stream
+```
+
+该接口使用 MJPEG 长连接持续输出 JPEG 帧。后端只在存在浏览器连接时打开 `/dev/ucar_video`，没有连接时释放摄像头。
+
+前端 Camera 默认加载：
+
+```text
+/api/camera_stream
+```
+
+`Refresh Camera` 现在只用于断流后重连，不再作为正常刷新手段。
+
+### 限制
+
+如果 `/dev/ucar_video` 不存在或 OpenCV 无法读取，页面会显示 `Camera offline` 占位图。此时先检查相机设备节点和驱动，不要反复刷新页面。
+
+---
+
+## 42. Web 面板缺少守护导致端口占用或异常退出
+
+### 问题
+
+手动运行：
+
+```bash
+python3 /home/ucar/web_panel/server.py
+```
+
+可能报：
+
+```text
+OSError: [Errno 98] Address already in use
+```
+
+或者 SSH 终端关闭后 Web 面板离线。
+
+### 原因
+
+旧方式依赖人工前台启动 Flask。旧进程或 systemd 进程占用 8080 时，再启动一个新进程就会端口冲突。
+
+### 修复
+
+仓库新增 systemd 单元：
+
+```text
+systemd/ucar_web.service
+```
+
+服务显式加载 ROS Melodic 和 `nav_clean_ws` 环境，设置：
+
+```text
+ROS_MASTER_URI=http://10.90.122.179:11311
+ROS_IP=10.90.122.179
+Restart=always
+RestartSec=3
+```
+
+### 以后更好的使用
+
+Web 面板优先用 systemd 管理：
+
+```bash
+systemctl status ucar_web.service --no-pager
+sudo systemctl restart ucar_web.service
+```
+
+不要同时保留手动 `python3 server.py` 和 systemd 服务，否则会再次出现 8080 端口占用。
+
+---
+
+## 43. 导航被安全层拦住时缺少直观提示
+
+### 问题
+
+小车遇到障碍会停止，但页面只显示 Mode 或日志，难以判断是导航失败、move_base 未启动，还是 Web 安全层主动拦截。
+
+### 修复
+
+Drive 页面新增 Safety 卡片，直接显示：
+
+```text
+Obstacle: CLEAR / CAUTION / BLOCKED
+Battery: 电量百分比
+Front: 前方扇区最近距离
+Safety Box: 安全盒最近距离
+```
+
+含义：
+
+- `CLEAR`：Web 安全层未发现前方风险；
+- `CAUTION`：附近有障碍，但不会取消导航；
+- `BLOCKED`：低于急停阈值，Web 会取消导航、发零速度并切回 Manual。
+
+### 以后更好的使用
+
+如果设置 goal 后不动，先看 Safety 卡片：
+
+```text
+BLOCKED = 先移开障碍或调整目标
+CAUTION = 可以导航，但速度和路径会更保守
+CLEAR = 再检查 move_base/amcl/map_server 状态
+```

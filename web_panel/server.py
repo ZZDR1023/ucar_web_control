@@ -87,6 +87,10 @@ SAFETY_BOX_REAR = 0.02
 SAFETY_BOX_HALF_WIDTH = 0.30
 SAFETY_BOX_STOP_DISTANCE = 0.35
 BATTERY_STALE_SECONDS = 10.0
+camera_lock = threading.Lock()
+latest_camera_jpeg = None
+latest_camera_stamp = 0.0
+camera_clients = 0
 
 rospy.init_node("web_panel_server", anonymous=True, disable_signals=True)
 cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
@@ -237,6 +241,59 @@ rospy.Subscriber("/amcl_pose", PoseWithCovarianceStamped, amcl_cb)
 rospy.Subscriber("/move_base/status", GoalStatusArray, move_base_status_cb)
 rospy.Subscriber("/scan", LaserScan, scan_cb)
 rospy.Subscriber("/map", OccupancyGrid, map_cb)
+
+
+def offline_camera_jpeg():
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (640, 480), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.text((20, 20), "Camera offline", fill=(255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def camera_loop():
+    global latest_camera_jpeg, latest_camera_stamp
+    try:
+        import cv2
+    except Exception:
+        latest_camera_jpeg = offline_camera_jpeg()
+        latest_camera_stamp = time.time()
+        return
+    cap = None
+    while not rospy.is_shutdown():
+        with camera_lock:
+            active = camera_clients > 0
+        if not active:
+            if cap is not None:
+                cap.release()
+                cap = None
+            time.sleep(0.2)
+            continue
+        try:
+            if cap is None or not cap.isOpened():
+                cap = cv2.VideoCapture("/dev/ucar_video")
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ok:
+                    with camera_lock:
+                        latest_camera_jpeg = jpeg.tobytes()
+                        latest_camera_stamp = time.time()
+            else:
+                time.sleep(0.1)
+        except Exception:
+            if cap is not None:
+                cap.release()
+                cap = None
+            time.sleep(0.5)
+        time.sleep(0.08)
+
+
+threading.Thread(target=camera_loop, daemon=True).start()
 
 
 def cmd_loop():
@@ -551,25 +608,38 @@ def api_live_map():
 
 @app.route("/api/camera")
 def api_camera():
-    try:
-        import cv2
-        cap = cv2.VideoCapture("/dev/ucar_video")
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        ret, frame = cap.read()
-        cap.release()
-        if ret and frame is not None:
-            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            return Response(jpeg.tobytes(), mimetype="image/jpeg")
-    except Exception:
-        pass
-    from PIL import Image, ImageDraw
-    img = Image.new("RGB", (640, 480), (0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.text((20, 20), "Camera offline", fill=(255, 255, 255))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG")
-    return Response(buf.getvalue(), mimetype="image/jpeg")
+    with camera_lock:
+        frame = latest_camera_jpeg
+    return Response(frame or offline_camera_jpeg(), mimetype="image/jpeg")
+
+
+@app.route("/api/camera_stream")
+def api_camera_stream():
+    global camera_clients
+    with camera_lock:
+        camera_clients += 1
+
+    def frames():
+        global camera_clients
+        last_stamp = 0.0
+        try:
+            while True:
+                with camera_lock:
+                    frame = latest_camera_jpeg
+                    stamp = latest_camera_stamp
+                if frame is not None and stamp != last_stamp:
+                    last_stamp = stamp
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Cache-Control: no-cache\r\n\r\n" + frame + b"\r\n"
+                    )
+                time.sleep(0.05)
+        finally:
+            with camera_lock:
+                camera_clients = max(0, camera_clients - 1)
+
+    return Response(frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.route("/api/cmd_vel", methods=["POST"])

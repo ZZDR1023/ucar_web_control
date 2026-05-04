@@ -1351,10 +1351,40 @@ http://10.90.122.179:8080
 - 禁止把启动位置当作 map 原点。Map 页 `Set AMCL Pose Here` 只用于定位校正：先点小车真实位置，再设置 AMCL 初始位姿。
 - Map 支持缩放：`Ctrl + 鼠标滚轮` 以鼠标位置为中心缩放，也可以用 `Zoom + / Zoom - / Reset`。
 - 控制面板现在是单页布局：手动控制、Map、Camera、Log 同屏显示，Camera 会自动实时刷新。
+- Camera 现在默认使用 `/api/camera_stream` MJPEG 长连接，不再每 700ms 轮询 `/api/camera`；`Refresh Camera` 只用于重连流。
+- Safety 卡片会直接显示 `CLEAR / CAUTION / BLOCKED`、前方距离、安全盒距离和电量，优先看这里判断为什么导航被 Web 急停层拦住。
 - 为减少碰撞，Web 启动时会将 DWA 导航速度限制到 `0.18m/s`，并把 local/global costmap inflation 调到 `0.35m`。
 - Web 急停层有前方安全盒：`front=0.50m`、`half_width=0.30m`；如果行李箱等物体不在雷达扫描平面内，仍需要人工降低风险。
 - 前方安全状态分两级：`caution=true` 只提示，`blocked=true` 才会取消导航并切回 Manual；当前急停阈值为 `0.35m`。
 - 顶部和 Status 卡片会显示 `/battery_state` 电量；低于 20% 变红，10 秒没有新数据会显示 `stale`，完全没有话题则显示 `Battery no data`。
+
+Web 服务推荐由 systemd 守护运行，避免手动启动后终端关闭或进程崩溃导致面板离线。仓库内单元文件：
+
+```text
+systemd/ucar_web.service
+```
+
+首次安装到小车：
+
+```bash
+sudo cp /tmp/ucar_web.service /etc/systemd/system/ucar_web.service
+sudo systemctl daemon-reload
+sudo systemctl enable ucar_web.service
+sudo systemctl restart ucar_web.service
+```
+
+日常查看和重启：
+
+```bash
+systemctl status ucar_web.service --no-pager
+sudo systemctl restart ucar_web.service
+```
+
+如果手动运行 `python3 /home/ucar/web_panel/server.py` 报 `Address already in use`，通常说明 systemd 或旧 Flask 进程已经占用 8080。优先查看：
+
+```bash
+systemctl status ucar_web.service --no-pager
+```
 
 ### 8. x11vnc 断线后的恢复
 
