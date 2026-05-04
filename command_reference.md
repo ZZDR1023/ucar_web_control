@@ -1345,6 +1345,8 @@ http://10.90.122.179:8080
 - 高频移动按钮应走 `/api/cmd_vel` 和 `/api/manual_stop` 这类轻量接口，不要走会同步杀导航/等待 ROS 的慢接口。
 - 页面状态里的位置应以 `/amcl_pose` 的 `map` 坐标为准；不要把 `/odom` 坐标直接当导航目标。
 - Map 页会显示 `/scan` 雷达状态；全局导航仍使用封门地图，雷达用于 local costmap 动态避障。
+- Map 页已内嵌 Camera，并显示 `goal distance` / `reissues`；如果 goal 被 move_base 提前结束，后端会自动补发最近目标。
+- 顶部和 Status 卡片会显示 `/battery_state` 电量；低于 20% 变红，10 秒没有新数据会显示 `stale`，完全没有话题则显示 `Battery no data`。
 
 ### 8. x11vnc 断线后的恢复
 

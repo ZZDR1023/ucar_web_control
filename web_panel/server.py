@@ -14,8 +14,8 @@ import rospy
 from actionlib_msgs.msg import GoalID
 from actionlib_msgs.msg import GoalStatusArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import BatteryState, LaserScan
 
 app = Flask(__name__)
 
@@ -25,9 +25,23 @@ CURRENT_ANGULAR_Z = 0.0
 lock = threading.Lock()
 latest_odom = {"x": 0.0, "y": 0.0, "linear": 0.0, "angular": 0.0}
 latest_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+latest_battery = {
+    "seen": False,
+    "stamp": 0.0,
+    "voltage": None,
+    "percentage": None,
+    "display_percentage": None,
+    "age": None,
+    "stale": True,
+    "low": False,
+}
 latest_goal = None
 latest_move_base_status = {"code": None, "text": "no status"}
 latest_scan = {"seen": False, "stamp": 0.0, "range_min": 0.0, "range_max": 0.0, "sample_count": 0}
+latest_scan_points = []
+latest_forward_obstacle = {"blocked": False, "min_distance": None, "threshold": 0.35}
+latest_live_map = None
+latest_goal_distance = None
 latest_nav_state = {
     "move_base": False,
     "amcl": False,
@@ -36,6 +50,12 @@ latest_nav_state = {
 }
 pending_goal = None
 nav_start_in_progress = False
+last_goal_publish_time = 0.0
+auto_reissue_count = 0
+nav_tuning_applied = False
+latest_nav_tuning = {"ok": False, "detail": "not applied"}
+GOAL_REISSUE_DISTANCE = 0.12
+GOAL_REISSUE_INTERVAL = 2.0
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MAP_PREVIEW_CANDIDATES = [
     os.path.abspath(os.path.join(BASE_DIR, "..", "maps", "ucar_map_20260501_202713_sealed_preview.png")),
@@ -49,6 +69,9 @@ MAP_INFO = {
     "width": 453,
     "height": 430,
 }
+FRONT_STOP_DISTANCE = 0.55
+FRONT_STOP_HALF_ANGLE = math.radians(28)
+BATTERY_STALE_SECONDS = 10.0
 
 rospy.init_node("web_panel_server", anonymous=True, disable_signals=True)
 cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
@@ -66,6 +89,30 @@ def odom_cb(msg):
 
 
 rospy.Subscriber("/odom", Odometry, odom_cb)
+
+
+def battery_cb(msg):
+    global latest_battery
+    percentage = msg.percentage if math.isfinite(msg.percentage) else None
+    voltage = msg.voltage if math.isfinite(msg.voltage) and msg.voltage > 0.0 else None
+    display_percentage = None
+    if percentage is not None and percentage >= 0.0:
+        # ROS standard is 0.0-1.0, but some UCAR images publish 0-100.
+        display_percentage = percentage * 100.0 if percentage <= 1.0 else percentage
+        display_percentage = max(0.0, min(100.0, display_percentage))
+    latest_battery = {
+        "seen": True,
+        "stamp": time.time(),
+        "voltage": voltage,
+        "percentage": percentage,
+        "display_percentage": display_percentage,
+        "age": 0.0,
+        "stale": False,
+        "low": display_percentage is not None and display_percentage < 20.0,
+    }
+
+
+rospy.Subscriber("/battery_state", BatteryState, battery_cb)
 
 
 def quat_to_yaw(q):
@@ -89,7 +136,32 @@ def move_base_status_cb(msg):
 
 
 def scan_cb(msg):
-    global latest_scan
+    global latest_scan, latest_scan_points, latest_forward_obstacle
+    points = []
+    front_min = None
+    with lock:
+        pose = dict(latest_pose)
+    angle = msg.angle_min
+    step = max(1, len(msg.ranges) // 240)
+    for idx, distance in enumerate(msg.ranges):
+        if not math.isfinite(distance) or distance < msg.range_min or distance > msg.range_max:
+            angle += msg.angle_increment
+            continue
+        if abs(angle) <= FRONT_STOP_HALF_ANGLE:
+            front_min = distance if front_min is None else min(front_min, distance)
+        if idx % step == 0 and distance <= 5.0:
+            world_angle = pose["yaw"] + angle
+            points.append({
+                "x": pose["x"] + math.cos(world_angle) * distance,
+                "y": pose["y"] + math.sin(world_angle) * distance,
+            })
+        angle += msg.angle_increment
+    latest_scan_points = points
+    latest_forward_obstacle = {
+        "blocked": front_min is not None and front_min < FRONT_STOP_DISTANCE,
+        "min_distance": front_min,
+        "threshold": FRONT_STOP_DISTANCE,
+    }
     latest_scan = {
         "seen": True,
         "stamp": time.time(),
@@ -99,9 +171,37 @@ def scan_cb(msg):
     }
 
 
+def map_cb(msg):
+    global latest_live_map, MAP_INFO
+    data = list(msg.data)
+    latest_live_map = {
+        "width": msg.info.width,
+        "height": msg.info.height,
+        "resolution": msg.info.resolution,
+        "origin": [
+            msg.info.origin.position.x,
+            msg.info.origin.position.y,
+            quat_to_yaw(msg.info.origin.orientation),
+        ],
+        "data": data,
+        "stamp": time.time(),
+    }
+    MAP_INFO = {
+        "resolution": msg.info.resolution,
+        "origin": [
+            msg.info.origin.position.x,
+            msg.info.origin.position.y,
+            quat_to_yaw(msg.info.origin.orientation),
+        ],
+        "width": msg.info.width,
+        "height": msg.info.height,
+    }
+
+
 rospy.Subscriber("/amcl_pose", PoseWithCovarianceStamped, amcl_cb)
 rospy.Subscriber("/move_base/status", GoalStatusArray, move_base_status_cb)
 rospy.Subscriber("/scan", LaserScan, scan_cb)
+rospy.Subscriber("/map", OccupancyGrid, map_cb)
 
 
 def cmd_loop():
@@ -153,10 +253,36 @@ def nav_nodes_running():
     }
 
 
+def apply_nav_tuning():
+    # Keep XY precision tighter, but relax final yaw to reduce in-place spinning.
+    return run_shell(
+        "source /opt/ros/melodic/setup.bash && "
+        "source /home/ucar/nav_clean_ws/devel/setup.bash && "
+        "export ROS_MASTER_URI=http://10.90.122.179:11311 && "
+        "export ROS_IP=10.90.122.179 && "
+        "rosparam set /move_base/DWAPlannerROS/xy_goal_tolerance 0.08 && "
+        "rosparam set /move_base/DWAPlannerROS/yaw_goal_tolerance 0.35 && "
+        "rosparam set /move_base/DWAPlannerROS/latch_xy_goal_tolerance true",
+        timeout=4,
+    )
+
+
 def nav_state_loop():
-    global latest_nav_state
+    global latest_nav_state, nav_tuning_applied, latest_nav_tuning
     while not rospy.is_shutdown():
         latest_nav_state = nav_nodes_running()
+        if (
+            not nav_tuning_applied
+            and latest_nav_state["move_base"]
+            and latest_nav_state["amcl"]
+            and latest_nav_state["map_server"]
+        ):
+            result = apply_nav_tuning()
+            nav_tuning_applied = result["returncode"] == 0
+            latest_nav_tuning = {
+                "ok": nav_tuning_applied,
+                "detail": result["stderr"] or result["stdout"] or "applied",
+            }
         time.sleep(3)
 
 
@@ -228,9 +354,11 @@ def make_goal_msg(x, y, yaw):
 
 
 def publish_goal_msg(msg, repeats=3, delay=0.05):
+    global last_goal_publish_time
     for _ in range(repeats):
         msg.header.stamp = rospy.Time.now()
         goal_pub.publish(msg)
+        last_goal_publish_time = time.time()
         if delay:
             time.sleep(delay)
 
@@ -242,11 +370,79 @@ def publish_pending_goal():
         publish_goal_msg(msg)
 
 
+def goal_distance():
+    with lock:
+        goal = latest_goal
+        pose = dict(latest_pose)
+    if not goal:
+        return None
+    return math.hypot(goal["x"] - pose["x"], goal["y"] - pose["y"])
+
+
+def goal_watchdog_loop():
+    global latest_goal_distance, auto_reissue_count
+    active_codes = set([0, 1, 6, 7])
+    while not rospy.is_shutdown():
+        latest_goal_distance = goal_distance()
+        with lock:
+            manual_mode = MANUAL_MODE
+            msg = pending_goal
+        status_code = latest_move_base_status.get("code")
+        nav_ready = latest_nav_state["move_base"] and latest_nav_state["amcl"] and latest_nav_state["map_server"]
+        should_reissue = (
+            not manual_mode
+            and msg is not None
+            and nav_ready
+            and latest_goal_distance is not None
+            and latest_goal_distance > GOAL_REISSUE_DISTANCE
+            and status_code not in active_codes
+            and time.time() - last_goal_publish_time > GOAL_REISSUE_INTERVAL
+        )
+        if should_reissue:
+            auto_reissue_count += 1
+            publish_goal_msg(msg, repeats=2, delay=0.05)
+        time.sleep(0.5)
+
+
+threading.Thread(target=goal_watchdog_loop, daemon=True).start()
+
+
+def safety_loop():
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    while not rospy.is_shutdown():
+        blocked = latest_forward_obstacle.get("blocked")
+        with lock:
+            manual_mode = MANUAL_MODE
+        if blocked and not manual_mode:
+            with lock:
+                MANUAL_MODE = True
+                CURRENT_LINEAR_X = 0.0
+                CURRENT_ANGULAR_Z = 0.0
+            cancel_pub.publish(GoalID())
+            cmd_pub.publish(Twist())
+        time.sleep(0.1)
+
+
+threading.Thread(target=safety_loop, daemon=True).start()
+
+
 def stop_manual_command():
     global CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
     with lock:
         CURRENT_LINEAR_X = 0.0
         CURRENT_ANGULAR_Z = 0.0
+
+
+def battery_status():
+    battery = dict(latest_battery)
+    if not battery.get("seen"):
+        battery["age"] = None
+        battery["stale"] = True
+        return battery
+    age = max(0.0, time.time() - battery.get("stamp", 0.0))
+    battery["age"] = age
+    battery["stale"] = age > BATTERY_STALE_SECONDS
+    return battery
 
 
 @app.after_request
@@ -271,12 +467,18 @@ def api_status():
     return jsonify({
         "odom": odom,
         "pose": pose,
+        "battery": battery_status(),
         "trajectory": [],
         "manual_mode": MANUAL_MODE,
         "current_cmd": current_cmd,
         "goal": latest_goal,
+        "goal_distance": latest_goal_distance,
+        "auto_reissue_count": auto_reissue_count,
+        "nav_tuning": latest_nav_tuning,
         "move_base_status": latest_move_base_status,
         "scan": latest_scan,
+        "scan_points": latest_scan_points,
+        "forward_obstacle": latest_forward_obstacle,
         "nav_state": latest_nav_state,
     })
 
@@ -293,6 +495,13 @@ def api_map():
 @app.route("/api/map_info")
 def api_map_info():
     return jsonify(MAP_INFO)
+
+
+@app.route("/api/live_map")
+def api_live_map():
+    if latest_live_map is None:
+        return jsonify({"ok": False, "error": "no /map received yet"}), 404
+    return jsonify({"ok": True, "map": latest_live_map})
 
 
 @app.route("/api/camera")

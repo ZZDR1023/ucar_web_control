@@ -2161,3 +2161,89 @@ range_max: 16.0
 - 跟随墙/避障漫游：没有全局目标点，只做局部行为。
 
 这些模式不能直接替代 `move_base + map + AMCL` 的全局目标导航。
+
+---
+
+## 35. Map 目标需要多次 Send Goal 才持续前进
+
+### 问题
+
+Map 页点击目标后，`Send Map Goal` 有时需要点多次。每点一次小车只移动一段距离，有时还会原地转圈。
+
+### 原因
+
+实测 `move_base/status` 可能提前进入：
+
+```text
+status: 3
+text: "Goal reached."
+```
+
+但 AMCL 位姿和前端目标之间仍存在明显距离。也可能因为局部路径或朝向调整导致 move_base 停止推进，需要再次发布同一目标才能继续。
+
+### 解决方法
+
+Web 后端增加 goal watchdog：
+
+- 保存最近一次 goal；
+- 持续计算 AMCL `map` 位姿到目标点的距离；
+- 如果当前不是手动模式、导航节点存在、目标距离仍大于 `0.12m`，但 move_base 已经不处于活动状态，就自动补发目标；
+- `/api/status` 返回 `goal_distance` 和 `auto_reissue_count`，Map 页直接显示自动补发次数。
+
+同时将 DWA 到达参数调为更适合实车：
+
+```text
+/move_base/DWAPlannerROS/xy_goal_tolerance = 0.08
+/move_base/DWAPlannerROS/yaw_goal_tolerance = 0.35
+/move_base/DWAPlannerROS/latch_xy_goal_tolerance = true
+```
+
+含义：位置更精确，最终朝向更宽松，减少到点附近反复原地转圈。
+
+### 前端改动
+
+Camera 已合并到 Map 页右侧，不再单独切换 Camera tab。
+
+Map 状态行会显示：
+
+```text
+goal distance=...m, reissues=...
+```
+
+如果 `reissues` 增长，说明后端正在替你自动补发目标，不需要反复手点。
+
+---
+
+## 36. Web 面板显示小车电量
+
+### 问题
+
+小车没电时，Web 面板原来只能看到连接/导航状态，无法直接判断是否是电量导致底盘无响应。
+
+### 解决方法
+
+Web 后端订阅 ROS 标准话题：
+
+```text
+/battery_state
+sensor_msgs/BatteryState
+```
+
+并在 `/api/status` 返回 `battery` 字段。前端顶部和 Status 卡片显示：
+
+```text
+Battery 50% · 12.34V
+```
+
+兼容两种常见百分比格式：
+
+- ROS 标准 `0.0~1.0`，例如 `0.5` 显示为 `50%`；
+- 部分 UCAR 镜像直接发布 `0~100`，例如 `50.0` 显示为 `50%`。
+
+### 状态规则
+
+- `low=true`：电量低于 20%，页面电量变红；
+- `stale=true`：超过 10 秒没有收到新的 `/battery_state`，页面显示 `stale` 并变黄；
+- 如果完全没有收到 `/battery_state`，页面显示 `Battery no data`。
+
+注意：如果驱动发布的 `voltage` 为 `0.0`，前端会显示 `--V`，避免把无效电压误认为真实电压。

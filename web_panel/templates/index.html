@@ -8,7 +8,8 @@
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-height:100vh}
 .header{background:#16213e;padding:12px 20px;display:flex;align-items:center;gap:12px;border-bottom:2px solid #0f3460}.header h1{font-size:18px;font-weight:600}
-.dot{width:10px;height:10px;border-radius:50%;background:#4caf50}
+.dot{width:10px;height:10px;border-radius:50%;background:#4caf50}.dot.low{background:#e94560}.dot.warn{background:#ffd166}
+.battery-pill{margin-left:auto;background:#0f3460;border:1px solid #2a4a7f;border-radius:999px;padding:5px 10px;font-size:12px;color:#eee}.battery-pill.low{background:#e94560;border-color:#e94560;color:#fff}.battery-pill.warn{background:#5a4a16;border-color:#ffd166;color:#ffd166}
 .tabs{display:flex;gap:4px;padding:8px 16px;background:#0f1124}
 .tab{padding:8px 16px;background:#16213e;border:none;color:#aaa;border-radius:6px 6px 0 0;cursor:pointer;font-size:13px}
 .tab.active{background:#1a1a2e;color:#e94560;border-bottom:2px solid #e94560}
@@ -27,18 +28,16 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
 .box{background:#222;border-radius:8px;min-height:220px;display:flex;align-items:center;justify-content:center;color:#bbb;text-align:center;padding:20px}
 .box img{width:100%;display:block}
 .log-box{background:#0a0a1a;border-radius:6px;padding:8px;height:160px;overflow-y:auto;font-family:'Consolas',monospace;font-size:11px;color:#888}.log-box div{padding:1px 0}
-.map-box{position:relative;min-height:320px;display:block;padding:12px}.map-box img{max-height:100%;object-fit:contain;cursor:crosshair}
-.map-marker{position:absolute;width:14px;height:14px;border-radius:50%;border:2px solid #ffd166;background:#e94560;transform:translate(-50%,-50%);box-shadow:0 0 0 4px rgba(233,69,96,.22);pointer-events:none;display:none}
-.robot-marker{position:absolute;width:12px;height:12px;border-radius:50%;border:2px solid #4caf50;background:#16213e;transform:translate(-50%,-50%);pointer-events:none;display:none}
+.map-box{position:relative;min-height:320px;display:block;padding:12px}
+.map-box canvas{width:100%;height:auto;display:block;background:#222;border-radius:6px;cursor:crosshair}
 .status-line{font-size:11px;color:#888;line-height:1.5;margin-top:8px;word-break:break-all}
 </style>
 </head>
 <body>
-<div class="header"><div class="dot" id="sd"></div><h1>UCAR Robot Control</h1></div>
+<div class="header"><div class="dot" id="sd"></div><h1>UCAR Robot Control</h1><div class="battery-pill" id="batteryPill">Battery --</div></div>
 <div class="tabs">
   <button class="tab active" onclick="showTab('drive')">Drive</button>
   <button class="tab" onclick="showTab('map')">Map</button>
-  <button class="tab" onclick="showTab('camera')">Camera</button>
   <button class="tab" onclick="showTab('log')">Log</button>
 </div>
 
@@ -68,6 +67,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
       <div class="row"><span class="lbl">Angular</span><span class="val" id="av">--</span></div>
       <div class="row"><span class="lbl">Cmd</span><span class="val" id="cmdv">--</span></div>
       <div class="row"><span class="lbl">Mode</span><span class="val" id="modeLabel" style="color:#e94560">Manual</span></div>
+      <div class="row"><span class="lbl">Battery</span><span class="val" id="batteryVal">--</span></div>
     </div>
     <div class="card">
       <h2>Control Mode</h2>
@@ -100,9 +100,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
     <div class="card">
       <h2>Map</h2>
       <div class="box map-box">
-        <img id="mapImg" src="/api/map" onclick="selectMapGoal(event)" onerror="this.style.display='none';document.getElementById('mapFallback').style.display='block';">
-        <div class="robot-marker" id="robotMarker"></div>
-        <div class="map-marker" id="goalMarker"></div>
+        <canvas id="mapCanvas" width="453" height="430" onclick="selectMapGoal(event)" onmousemove="previewGoalYaw(event)"></canvas>
         <div id="mapFallback" style="display:none">Map preview unavailable<br><small>Check /api/map or open RViz for live navigation.</small></div>
       </div>
       <div class="status-line" id="mapStatus">Click the map to select a goal in map coordinates.</div>
@@ -113,13 +111,17 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
         <button class="btn bnav" style="flex:1" onclick="refreshMap()">Refresh Map</button>
       </div>
     </div>
+    <div class="card">
+      <h2>Camera</h2>
+      <div class="box"><img id="camImg" src="/api/camera" onerror="this.style.display='none';"></div>
+      <button class="btn bnav" style="width:100%;margin-top:6px" onclick="refreshCamera()">Refresh Camera</button>
+    </div>
   </div>
 </div>
-<div class="page" id="camera"><div class="grid2"><div class="card"><h2>Camera Feed</h2><div class="box"><img id="camImg" src="/api/camera" onerror="this.style.display='none';"></div><button class="btn bnav" onclick="refreshCamera()">Refresh</button></div></div></div>
 <div class="page" id="log"><div class="grid2"><div class="card"><h2>Log</h2><div class="log-box" id="logBox"></div></div></div></div>
 <script>
-const GEARS=[{l:0.10,a:0.50},{l:0.18,a:0.90},{l:0.28,a:1.30}];let speed=0.18,angSpeed=0.90,holdTimer=null,statusBusy=false,mapInfo=null,latestStatus=null;
-function showTab(id){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector(`[onclick="showTab('${id}')"]`).classList.add('active');if(id==='camera') refreshCamera();if(id==='map') refreshMap();}
+const GEARS=[{l:0.10,a:0.50},{l:0.18,a:0.90},{l:0.28,a:1.30}];let speed=0.18,angSpeed=0.90,holdTimer=null,statusBusy=false,mapInfo=null,liveMap=null,latestStatus=null,selectedGoal=null;
+function showTab(id){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector(`[onclick="showTab('${id}')"]`).classList.add('active');if(id==='map'){refreshMap();refreshCamera();}}
 function setGear(i){speed=GEARS[i].l;angSpeed=GEARS[i].a;document.getElementById('g1').className='btn bgear'+(i===0?' on':'');document.getElementById('g2').className='btn bgear'+(i===1?' on':'');document.getElementById('g3').className='btn bgear'+(i===2?' on':'');document.getElementById('gearLabel').textContent=i+1;document.getElementById('gearVal').textContent=speed.toFixed(2);addLog(`Gear ${i+1}: ${speed} m/s`)}
 setGear(1);
 async function apiPost(url,data){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});return await r.json();}
@@ -128,10 +130,14 @@ function addLog(m){const b=document.getElementById('logBox');const t=new Date().
 function fmtNavState(s){if(!s)return'nav state unavailable';const nodes=(s.nodes||[]).join(', ')||'none';return`move_base=${!!s.move_base} amcl=${!!s.amcl} map_server=${!!s.map_server} | nodes: ${nodes}`}
 function mapToPixel(x,y){if(!mapInfo)return null;return{x:(x-mapInfo.origin[0])/mapInfo.resolution,y:mapInfo.height-((y-mapInfo.origin[1])/mapInfo.resolution)}}
 function pixelToMap(px,py){return{x:mapInfo.origin[0]+px*mapInfo.resolution,y:mapInfo.origin[1]+(mapInfo.height-py)*mapInfo.resolution}}
-function placeMarker(id,x,y){const img=document.getElementById('mapImg');const marker=document.getElementById(id);if(!mapInfo||!img||!marker)return;const p=mapToPixel(x,y);const imgRect=img.getBoundingClientRect();const boxRect=img.parentElement.getBoundingClientRect();if(!p)return;marker.style.left=(imgRect.left-boxRect.left+(p.x/mapInfo.width)*imgRect.width)+'px';marker.style.top=(imgRect.top-boxRect.top+(p.y/mapInfo.height)*imgRect.height)+'px';marker.style.display='block'}
-function updateMapMarkers(){if(latestStatus&&latestStatus.pose)placeMarker('robotMarker',latestStatus.pose.x,latestStatus.pose.y);if(latestStatus&&latestStatus.goal)placeMarker('goalMarker',latestStatus.goal.x,latestStatus.goal.y)}
-async function loadMapInfo(){try{mapInfo=await apiGet('/api/map_info');updateMapMarkers();}catch(e){addLog('map info err: '+e.message)}}
-function selectMapGoal(e){if(!mapInfo)return;const img=e.currentTarget;const rect=img.getBoundingClientRect();const px=((e.clientX-rect.left)/rect.width)*mapInfo.width;const py=((e.clientY-rect.top)/rect.height)*mapInfo.height;const goal=pixelToMap(px,py);let yaw=parseFloat(document.getElementById('gyaw').value)||0;if(latestStatus&&latestStatus.pose){yaw=Math.atan2(goal.y-latestStatus.pose.y,goal.x-latestStatus.pose.x)}document.getElementById('gx').value=goal.x.toFixed(3);document.getElementById('gy').value=goal.y.toFixed(3);document.getElementById('gyaw').value=yaw.toFixed(3);document.getElementById('goalStatus').textContent=`Selected map goal: x=${goal.x.toFixed(3)}, y=${goal.y.toFixed(3)}, yaw=${yaw.toFixed(2)}. Press GO to navigate.`;placeMarker('goalMarker',goal.x,goal.y);addLog(`Map goal selected ${goal.x.toFixed(3)}, ${goal.y.toFixed(3)}`)}
+function canvasPoint(e){const c=document.getElementById('mapCanvas');const r=c.getBoundingClientRect();return{x:((e.clientX-r.left)/r.width)*c.width,y:((e.clientY-r.top)/r.height)*c.height}}
+function drawArrow(ctx,x,y,yaw,color,size){ctx.save();ctx.translate(x,y);ctx.rotate(-yaw);ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(size,0);ctx.stroke();ctx.beginPath();ctx.moveTo(size,0);ctx.lineTo(size-8,-5);ctx.lineTo(size-8,5);ctx.closePath();ctx.fill();ctx.restore()}
+function drawLiveMap(){const c=document.getElementById('mapCanvas');if(!c||!mapInfo)return;const ctx=c.getContext('2d');c.width=mapInfo.width;c.height=mapInfo.height;const data=liveMap&&liveMap.data;const img=ctx.createImageData(c.width,c.height);for(let y=0;y<c.height;y++){for(let x=0;x<c.width;x++){const src=(c.height-1-y)*c.width+x;const v=data?data[src]:-1;let shade=45;if(v===0)shade=220;else if(v>60)shade=20;else if(v>0)shade=120;const i=(y*c.width+x)*4;img.data[i]=shade;img.data[i+1]=shade;img.data[i+2]=shade;img.data[i+3]=255;}}ctx.putImageData(img,0,0);if(latestStatus&&latestStatus.scan_points){ctx.fillStyle='rgba(255,209,102,.85)';for(const p of latestStatus.scan_points){const px=mapToPixel(p.x,p.y);if(px){ctx.fillRect(px.x-1,px.y-1,2,2);}}}if(latestStatus&&latestStatus.pose){const p=mapToPixel(latestStatus.pose.x,latestStatus.pose.y);if(p){ctx.fillStyle='#4caf50';ctx.beginPath();ctx.arc(p.x,p.y,5,0,Math.PI*2);ctx.fill();drawArrow(ctx,p.x,p.y,latestStatus.pose.yaw,'#4caf50',22);}}const g=selectedGoal||(latestStatus&&latestStatus.goal);if(g){const p=mapToPixel(g.x,g.y);if(p){ctx.fillStyle='#e94560';ctx.beginPath();ctx.arc(p.x,p.y,5,0,Math.PI*2);ctx.fill();drawArrow(ctx,p.x,p.y,g.yaw||0,'#e94560',22);}}}
+function updateMapMarkers(){drawLiveMap()}
+async function loadMapInfo(){try{mapInfo=await apiGet('/api/map_info');drawLiveMap();}catch(e){addLog('map info err: '+e.message)}}
+async function loadLiveMap(){try{const r=await apiGet('/api/live_map');if(r&&r.ok){liveMap=r.map;mapInfo={width:r.map.width,height:r.map.height,resolution:r.map.resolution,origin:r.map.origin};drawLiveMap();}}catch(e){}}
+function selectMapGoal(e){if(!mapInfo)return;const pt=canvasPoint(e);const goal=pixelToMap(pt.x,pt.y);let yaw=parseFloat(document.getElementById('gyaw').value)||0;if(selectedGoal&&Math.hypot(goal.x-selectedGoal.x,goal.y-selectedGoal.y)>0.05){yaw=Math.atan2(goal.y-selectedGoal.y,goal.x-selectedGoal.x);goal.x=selectedGoal.x;goal.y=selectedGoal.y;}else if(latestStatus&&latestStatus.pose){yaw=Math.atan2(goal.y-latestStatus.pose.y,goal.x-latestStatus.pose.x)}selectedGoal={x:goal.x,y:goal.y,yaw};document.getElementById('gx').value=goal.x.toFixed(3);document.getElementById('gy').value=goal.y.toFixed(3);document.getElementById('gyaw').value=yaw.toFixed(3);document.getElementById('goalStatus').textContent=`Selected map goal: x=${goal.x.toFixed(3)}, y=${goal.y.toFixed(3)}, yaw=${yaw.toFixed(2)}. Click another point to set heading, then GO.`;drawLiveMap();addLog(`Map goal selected ${goal.x.toFixed(3)}, ${goal.y.toFixed(3)}, yaw ${yaw.toFixed(2)}`)}
+function previewGoalYaw(e){if(!selectedGoal||!mapInfo)return;const pt=canvasPoint(e);const p=pixelToMap(pt.x,pt.y);selectedGoal.yaw=Math.atan2(p.y-selectedGoal.y,p.x-selectedGoal.x);document.getElementById('gyaw').value=selectedGoal.yaw.toFixed(3);drawLiveMap();}
 async function sendVel(lx,az){const j=await apiPost('/api/cmd_vel',{linear_x:lx,angular_z:az});addLog(`cmd_vel ${lx}, ${az}`);return j}
 function velocityForDir(dir){if(dir==='w')return[speed,0];if(dir==='s')return[-speed,0];if(dir==='a')return[0,angSpeed];if(dir==='d')return[0,-angSpeed];return[0,0];}
 function startHold(dir){if(holdTimer){clearInterval(holdTimer);holdTimer=null;}const v=velocityForDir(dir);sendVel(v[0],v[1]);holdTimer=setInterval(()=>sendVel(v[0],v[1]),100);}
@@ -140,12 +146,13 @@ function stopHold(){if(holdTimer){clearInterval(holdTimer);holdTimer=null;}manua
 async function sendStop(){await apiPost('/api/stop',{});addLog('STOP')}
 async function doTakeover(){const r=await apiPost('/api/takeover',{});document.getElementById('modeLabel').textContent='Manual';document.getElementById('modeLabel').style.color='#e94560';document.getElementById('mapStatus').textContent=fmtNavState(r.nav_state);addLog('Takeover: manual mode')}
 async function doResumeNav(){const r=await apiPost('/api/resume_nav',{});document.getElementById('modeLabel').textContent='Navigation';document.getElementById('modeLabel').style.color='#4caf50';document.getElementById('mapStatus').textContent=fmtNavState(r.nav_state);addLog('Resume nav')}
-async function sendGoal(){const x=parseFloat(document.getElementById('gx').value);const y=parseFloat(document.getElementById('gy').value);const yaw=parseFloat(document.getElementById('gyaw').value);const r=await apiPost('/api/goal',{x,y,yaw});addLog(`Goal: ${x}, ${y}`);document.getElementById('mapStatus').textContent=`goal ok | ${fmtNavState(r.nav_state)}`;document.getElementById('goalStatus').textContent=`Sent goal: x=${x.toFixed(3)}, y=${y.toFixed(3)}, yaw=${yaw.toFixed(2)}`;placeMarker('goalMarker',x,y)}
+async function sendGoal(){const x=parseFloat(document.getElementById('gx').value);const y=parseFloat(document.getElementById('gy').value);const yaw=parseFloat(document.getElementById('gyaw').value);selectedGoal={x,y,yaw};const r=await apiPost('/api/goal',{x,y,yaw});addLog(`Goal: ${x}, ${y}`);document.getElementById('mapStatus').textContent=`goal ok | ${fmtNavState(r.nav_state)}`;document.getElementById('goalStatus').textContent=`Sent goal: x=${x.toFixed(3)}, y=${y.toFixed(3)}, yaw=${yaw.toFixed(2)}`;drawLiveMap();}
 function fillCurrentPose(){if(!latestStatus||!latestStatus.pose){addLog('No AMCL pose yet');return;}document.getElementById('gx').value=latestStatus.pose.x.toFixed(3);document.getElementById('gy').value=latestStatus.pose.y.toFixed(3);document.getElementById('gyaw').value=latestStatus.pose.yaw.toFixed(3);addLog('Filled current map pose')}
-function relativeGoal(forward,left){if(!latestStatus||!latestStatus.pose){addLog('No AMCL pose yet');return;}const p=latestStatus.pose;const x=p.x+Math.cos(p.yaw)*forward-Math.sin(p.yaw)*left;const y=p.y+Math.sin(p.yaw)*forward+Math.cos(p.yaw)*left;document.getElementById('gx').value=x.toFixed(3);document.getElementById('gy').value=y.toFixed(3);document.getElementById('gyaw').value=p.yaw.toFixed(3);document.getElementById('goalStatus').textContent=`Relative goal: x=${x.toFixed(3)}, y=${y.toFixed(3)}. Press GO to navigate.`;placeMarker('goalMarker',x,y);addLog(`Relative goal ${x.toFixed(3)}, ${y.toFixed(3)}`)}
+function relativeGoal(forward,left){if(!latestStatus||!latestStatus.pose){addLog('No AMCL pose yet');return;}const p=latestStatus.pose;const x=p.x+Math.cos(p.yaw)*forward-Math.sin(p.yaw)*left;const y=p.y+Math.sin(p.yaw)*forward+Math.cos(p.yaw)*left;selectedGoal={x,y,yaw:p.yaw};document.getElementById('gx').value=x.toFixed(3);document.getElementById('gy').value=y.toFixed(3);document.getElementById('gyaw').value=p.yaw.toFixed(3);document.getElementById('goalStatus').textContent=`Relative goal: x=${x.toFixed(3)}, y=${y.toFixed(3)}. Press GO to navigate.`;drawLiveMap();addLog(`Relative goal ${x.toFixed(3)}, ${y.toFixed(3)}`)}
 async function resetPose(){await apiPost('/api/set_pose',{x:0,y:0});addLog('Pose reset to origin')}
 function refreshCamera(){const cam=document.getElementById('camImg');cam.style.display='block';cam.src='/api/camera?t='+Date.now();}
-async function refreshMap(){const map=document.getElementById('mapImg');const fallback=document.getElementById('mapFallback');map.style.display='block';fallback.style.display='none';map.src='/api/map?t='+Date.now();await loadMapInfo();try{const d=await apiGet('/api/status');latestStatus=d;document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state);updateMapMarkers();}catch(e){document.getElementById('mapStatus').textContent='map refresh failed: '+e.message}}
-async function updateStatus(){if(statusBusy)return;statusBusy=true;try{const d=await apiGet('/api/status');latestStatus=d;if(!d||!d.odom)return;const pose=d.pose||d.odom;document.getElementById('px').textContent=Number(pose.x||0).toFixed(3)+' m';document.getElementById('py').textContent=Number(pose.y||0).toFixed(3)+' m';document.getElementById('lv').textContent=Number(d.odom.linear||0).toFixed(3)+' m/s';document.getElementById('av').textContent=Number(d.odom.angular||0).toFixed(3)+' m/s';document.getElementById('cmdv').textContent=(d.current_cmd ? (Number(d.current_cmd.linear_x||0).toFixed(2)+', '+Number(d.current_cmd.angular_z||0).toFixed(2)) : '--');document.getElementById('modeLabel').textContent=d.manual_mode===false?'Navigation':'Manual';document.getElementById('modeLabel').style.color=d.manual_mode===false?'#4caf50':'#e94560';document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state)+' | move_base: '+((d.move_base_status&&d.move_base_status.text)||'--');if(d.scan&&d.scan.seen){const age=((Date.now()/1000)-d.scan.stamp).toFixed(1);document.getElementById('scanStatus').textContent=`Lidar dynamic obstacle layer active: /scan samples=${d.scan.sample_count}, age=${age}s`;}else{document.getElementById('scanStatus').textContent='Lidar dynamic obstacle layer: no /scan received yet';}updateMapMarkers();}catch(e){addLog('status err: '+e.message)}finally{statusBusy=false;}}
-setInterval(updateStatus,1500);loadMapInfo();refreshMap();refreshCamera();addLog('Panel loaded.');
+async function refreshMap(){await loadMapInfo();await loadLiveMap();try{const d=await apiGet('/api/status');latestStatus=d;document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state);updateMapMarkers();}catch(e){document.getElementById('mapStatus').textContent='map refresh failed: '+e.message}}
+function updateBattery(b){const pill=document.getElementById('batteryPill');const val=document.getElementById('batteryVal');const dot=document.getElementById('sd');if(!b||!b.seen){pill.textContent='Battery no data';val.textContent='no /battery_state';pill.className='battery-pill warn';dot.className='dot warn';return;}const pct=b.display_percentage===null||b.display_percentage===undefined?'--':Number(b.display_percentage).toFixed(0)+'%';const volt=b.voltage===null||b.voltage===undefined?'--':Number(b.voltage).toFixed(2)+'V';const stale=!!b.stale;const low=!!b.low;const suffix=stale?' stale':'';pill.textContent=`Battery ${pct} · ${volt}${suffix}`;val.textContent=`${pct} / ${volt}${stale?' / stale':''}`;pill.className='battery-pill'+(low?' low':(stale?' warn':''));dot.className='dot'+(low?' low':(stale?' warn':''));}
+async function updateStatus(){if(statusBusy)return;statusBusy=true;try{const d=await apiGet('/api/status');latestStatus=d;if(!d||!d.odom)return;const pose=d.pose||d.odom;document.getElementById('px').textContent=Number(pose.x||0).toFixed(3)+' m';document.getElementById('py').textContent=Number(pose.y||0).toFixed(3)+' m';document.getElementById('lv').textContent=Number(d.odom.linear||0).toFixed(3)+' m/s';document.getElementById('av').textContent=Number(d.odom.angular||0).toFixed(3)+' m/s';document.getElementById('cmdv').textContent=(d.current_cmd ? (Number(d.current_cmd.linear_x||0).toFixed(2)+', '+Number(d.current_cmd.angular_z||0).toFixed(2)) : '--');document.getElementById('modeLabel').textContent=d.manual_mode===false?'Navigation':'Manual';document.getElementById('modeLabel').style.color=d.manual_mode===false?'#4caf50':'#e94560';updateBattery(d.battery);const dist=(d.goal_distance===null||d.goal_distance===undefined)?'--':Number(d.goal_distance).toFixed(2)+'m';document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state)+' | move_base: '+((d.move_base_status&&d.move_base_status.text)||'--')+` | goal distance=${dist}, reissues=${d.auto_reissue_count||0}`;if(d.scan&&d.scan.seen){const age=((Date.now()/1000)-d.scan.stamp).toFixed(1);const obs=d.forward_obstacle||{};const min=obs.min_distance?Number(obs.min_distance).toFixed(2)+'m':'--';document.getElementById('scanStatus').textContent=`Lidar active: samples=${d.scan.sample_count}, age=${age}s | front=${min}, stop<${obs.threshold||'--'}m, blocked=${!!obs.blocked}`;}else{document.getElementById('scanStatus').textContent='Lidar dynamic obstacle layer: no /scan received yet';}updateMapMarkers();}catch(e){addLog('status err: '+e.message)}finally{statusBusy=false;}}
+setInterval(updateStatus,1000);setInterval(loadLiveMap,3000);loadMapInfo();refreshMap();refreshCamera();addLog('Panel loaded.');
 </script></body></html>
