@@ -83,6 +83,11 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
       <div class="status-line" id="safeHint">Safety state waiting for /api/status...</div>
     </div>
     <div class="card">
+      <h2>Camera</h2>
+      <div class="box"><img id="camImg" src="/api/camera_stream" onerror="this.onerror=null;this.src='/api/camera?t='+Date.now();"></div>
+      <button class="btn bnav" style="width:100%;margin-top:6px" onclick="refreshCamera()">Refresh Camera</button>
+    </div>
+    <div class="card">
       <h2>Navigation Goal</h2>
       <div class="goal-row">
         <div><label>X</label><input class="inp" type="number" id="gx" value="0.5" step="0.1"></div>
@@ -117,11 +122,6 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
         <button class="btn bgoal" style="flex:1" onclick="sendGoal()">Send Map Goal</button>
         <button class="btn bnav" style="flex:1" onclick="refreshMap()">Refresh Map</button>
       </div>
-    </div>
-    <div class="card">
-      <h2>Camera</h2>
-      <div class="box"><img id="camImg" src="/api/camera_stream" onerror="this.onerror=null;this.src='/api/camera?t='+Date.now();"></div>
-      <button class="btn bnav" style="width:100%;margin-top:6px" onclick="refreshCamera()">Refresh Camera</button>
     </div>
     <div class="card">
       <h2>Log</h2>
