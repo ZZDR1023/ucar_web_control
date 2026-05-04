@@ -2112,3 +2112,52 @@ map/amcl_pose: x=0.482, y=0.102
 ```
 
 不要为了切换模式频繁 kill/restart `move_base`、`amcl` 或 `map_server`，否则定位和代价地图状态会被破坏。
+
+---
+
+## 34. “不用地图只靠雷达避障”的边界
+
+### 问题
+
+用户希望 Map 页面让小车使用雷达自己判断有没有障碍物，而不是只依赖给定地图。
+
+### 结论
+
+当前正确架构不是“静态地图”和“雷达”二选一，而是：
+
+```text
+静态封门地图：提供 map 坐标、AMCL 定位、全局路径规划
+激光雷达 /scan：提供 local_costmap 动态障碍物标记与清除
+```
+
+也就是说，导航到指定目标点仍需要地图作为全局坐标基准；雷达负责识别临时障碍物、避障和清除局部代价地图。
+
+### 当前验证
+
+当前 `move_base` local costmap 已启用雷达障碍层：
+
+```text
+/move_base/local_costmap/obstacle_layer/enabled: true
+/move_base/local_costmap/obstacle_layer/observation_sources: laser_scan_sensor
+/move_base/local_costmap/obstacle_layer/laser_scan_sensor/topic: scan
+/move_base/local_costmap/obstacle_layer/laser_scan_sensor/marking: true
+/move_base/local_costmap/obstacle_layer/laser_scan_sensor/clearing: true
+```
+
+Web `/api/status` 已增加 `/scan` 状态，实测可收到：
+
+```text
+sample_count: 909
+range_min: 0.1
+range_max: 16.0
+```
+
+### 如果真的不使用静态地图
+
+那就不是当前“点地图目标导航”模式，而是另一类功能：
+
+- SLAM 建图中导航：边建图边更新 `/map`；
+- 纯局部避障：只根据雷达前方障碍做短距离控制；
+- 跟随墙/避障漫游：没有全局目标点，只做局部行为。
+
+这些模式不能直接替代 `move_base + map + AMCL` 的全局目标导航。

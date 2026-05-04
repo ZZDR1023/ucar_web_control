@@ -15,6 +15,7 @@ from actionlib_msgs.msg import GoalID
 from actionlib_msgs.msg import GoalStatusArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 
 app = Flask(__name__)
 
@@ -26,6 +27,7 @@ latest_odom = {"x": 0.0, "y": 0.0, "linear": 0.0, "angular": 0.0}
 latest_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
 latest_goal = None
 latest_move_base_status = {"code": None, "text": "no status"}
+latest_scan = {"seen": False, "stamp": 0.0, "range_min": 0.0, "range_max": 0.0, "sample_count": 0}
 latest_nav_state = {
     "move_base": False,
     "amcl": False,
@@ -86,8 +88,20 @@ def move_base_status_cb(msg):
         latest_move_base_status = {"code": None, "text": "no active move_base goal"}
 
 
+def scan_cb(msg):
+    global latest_scan
+    latest_scan = {
+        "seen": True,
+        "stamp": time.time(),
+        "range_min": msg.range_min,
+        "range_max": msg.range_max,
+        "sample_count": len(msg.ranges),
+    }
+
+
 rospy.Subscriber("/amcl_pose", PoseWithCovarianceStamped, amcl_cb)
 rospy.Subscriber("/move_base/status", GoalStatusArray, move_base_status_cb)
+rospy.Subscriber("/scan", LaserScan, scan_cb)
 
 
 def cmd_loop():
@@ -262,6 +276,7 @@ def api_status():
         "current_cmd": current_cmd,
         "goal": latest_goal,
         "move_base_status": latest_move_base_status,
+        "scan": latest_scan,
         "nav_state": latest_nav_state,
     })
 
