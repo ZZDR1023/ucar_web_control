@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+*.log
+*.bag
+*.active
+
+# Local editor/system backups.
+vscode_backup/code_*.deb
+
