@@ -10,10 +10,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
 .header{background:#16213e;padding:12px 20px;display:flex;align-items:center;gap:12px;border-bottom:2px solid #0f3460}.header h1{font-size:18px;font-weight:600}
 .dot{width:10px;height:10px;border-radius:50%;background:#4caf50}.dot.low{background:#e94560}.dot.warn{background:#ffd166}
 .battery-pill{margin-left:auto;background:#0f3460;border:1px solid #2a4a7f;border-radius:999px;padding:5px 10px;font-size:12px;color:#eee}.battery-pill.low{background:#e94560;border-color:#e94560;color:#fff}.battery-pill.warn{background:#5a4a16;border-color:#ffd166;color:#ffd166}
-.tabs{display:flex;gap:4px;padding:8px 16px;background:#0f1124}
-.tab{padding:8px 16px;background:#16213e;border:none;color:#aaa;border-radius:6px 6px 0 0;cursor:pointer;font-size:13px}
-.tab.active{background:#1a1a2e;color:#e94560;border-bottom:2px solid #e94560}
-.page{display:none;padding:16px}.page.active{display:block}
+.page{padding:16px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;max-width:1200px;margin:0 auto}.grid2>*{min-width:0}
 @media(max-width:800px){.grid2{grid-template-columns:1fr}}
 .card{background:#16213e;border-radius:10px;padding:16px;border:1px solid #0f3460}.card h2{font-size:14px;margin-bottom:10px;color:#e94560;text-transform:uppercase;letter-spacing:1px}
@@ -36,13 +33,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
 </head>
 <body>
 <div class="header"><div class="dot" id="sd"></div><h1>UCAR Robot Control</h1><div class="battery-pill" id="batteryPill">Battery --</div></div>
-<div class="tabs">
-  <button class="tab active" onclick="showTab('drive')">Drive</button>
-  <button class="tab" onclick="showTab('map')">Map</button>
-  <button class="tab" onclick="showTab('log')">Log</button>
-</div>
-
-<div class="page active" id="drive">
+<div class="page" id="drive">
   <div class="grid2">
     <div class="card">
       <h2>Direction Control</h2>
@@ -94,11 +85,6 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
       <button class="btn bnav" style="width:100%;margin-top:6px" onclick="setInitialPose()">Set AMCL Pose Here</button>
       <p style="font-size:11px;color:#888;margin-top:6px">Only use this for localization correction: select the robot's real position on the map first. Do not treat startup position as map origin.</p>
     </div>
-  </div>
-</div>
-
-<div class="page" id="map">
-  <div class="grid2">
     <div class="card">
       <h2>Map</h2>
       <div class="box map-box">
@@ -124,12 +110,14 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
       <div class="box"><img id="camImg" src="/api/camera" onerror="this.style.display='none';"></div>
       <button class="btn bnav" style="width:100%;margin-top:6px" onclick="refreshCamera()">Refresh Camera</button>
     </div>
+    <div class="card">
+      <h2>Log</h2>
+      <div class="log-box" id="logBox"></div>
+    </div>
   </div>
 </div>
-<div class="page" id="log"><div class="grid2"><div class="card"><h2>Log</h2><div class="log-box" id="logBox"></div></div></div></div>
 <script>
 const GEARS=[{l:0.10,a:0.50},{l:0.18,a:0.90},{l:0.28,a:1.30}];let speed=0.18,angSpeed=0.90,holdTimer=null,statusBusy=false,mapInfo=null,liveMap=null,latestStatus=null,selectedGoal=null,mapZoom=1,cameraTimer=null;
-function showTab(id){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector(`[onclick="showTab('${id}')"]`).classList.add('active');if(id==='map'){refreshMap();startCameraLive();}else{stopCameraLive();}}
 function setGear(i){speed=GEARS[i].l;angSpeed=GEARS[i].a;document.getElementById('g1').className='btn bgear'+(i===0?' on':'');document.getElementById('g2').className='btn bgear'+(i===1?' on':'');document.getElementById('g3').className='btn bgear'+(i===2?' on':'');document.getElementById('gearLabel').textContent=i+1;document.getElementById('gearVal').textContent=speed.toFixed(2);addLog(`Gear ${i+1}: ${speed} m/s`)}
 setGear(1);
 async function apiPost(url,data){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});return await r.json();}
@@ -170,5 +158,5 @@ function stopCameraLive(){if(cameraTimer){clearInterval(cameraTimer);cameraTimer
 async function refreshMap(){await loadMapInfo();await loadLiveMap();try{const d=await apiGet('/api/status');latestStatus=d;document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state);updateMapMarkers();}catch(e){document.getElementById('mapStatus').textContent='map refresh failed: '+e.message}}
 function updateBattery(b){const pill=document.getElementById('batteryPill');const val=document.getElementById('batteryVal');const dot=document.getElementById('sd');if(!b||!b.seen){pill.textContent='Battery no data';val.textContent='no /battery_state';pill.className='battery-pill warn';dot.className='dot warn';return;}const pct=b.display_percentage===null||b.display_percentage===undefined?'--':Number(b.display_percentage).toFixed(0)+'%';const volt=b.voltage===null||b.voltage===undefined?'--':Number(b.voltage).toFixed(2)+'V';const stale=!!b.stale;const low=!!b.low;const suffix=stale?' stale':'';pill.textContent=`Battery ${pct} · ${volt}${suffix}`;val.textContent=`${pct} / ${volt}${stale?' / stale':''}`;pill.className='battery-pill'+(low?' low':(stale?' warn':''));dot.className='dot'+(low?' low':(stale?' warn':''));}
 async function updateStatus(){if(statusBusy)return;statusBusy=true;try{const d=await apiGet('/api/status');latestStatus=d;if(!d||!d.odom)return;const pose=d.pose||d.odom;document.getElementById('px').textContent=Number(pose.x||0).toFixed(3)+' m';document.getElementById('py').textContent=Number(pose.y||0).toFixed(3)+' m';document.getElementById('lv').textContent=Number(d.odom.linear||0).toFixed(3)+' m/s';document.getElementById('av').textContent=Number(d.odom.angular||0).toFixed(3)+' m/s';document.getElementById('cmdv').textContent=(d.current_cmd ? (Number(d.current_cmd.linear_x||0).toFixed(2)+', '+Number(d.current_cmd.angular_z||0).toFixed(2)) : '--');document.getElementById('modeLabel').textContent=d.manual_mode===false?'Navigation':'Manual';document.getElementById('modeLabel').style.color=d.manual_mode===false?'#4caf50':'#e94560';updateBattery(d.battery);const dist=(d.goal_distance===null||d.goal_distance===undefined)?'--':Number(d.goal_distance).toFixed(2)+'m';document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state)+' | move_base: '+((d.move_base_status&&d.move_base_status.text)||'--')+` | goal distance=${dist}, reissues=${d.auto_reissue_count||0}`;if(d.scan&&d.scan.seen){const age=((Date.now()/1000)-d.scan.stamp).toFixed(1);const obs=d.forward_obstacle||{};const min=obs.min_distance?Number(obs.min_distance).toFixed(2)+'m':'--';const box=obs.box_min_distance?Number(obs.box_min_distance).toFixed(2)+'m':'--';document.getElementById('scanStatus').textContent=`Lidar: yellow hits=${(d.scan_points||[]).length}, age=${age}s | front=${min}, safety-box=${box}, stop<${obs.stop_distance||'--'}m, clear>${obs.clear_distance||'--'}m, blocked=${!!obs.blocked}`;}else{document.getElementById('scanStatus').textContent='Lidar dynamic obstacle layer: no /scan received yet';}updateMapMarkers();}catch(e){addLog('status err: '+e.message)}finally{statusBusy=false;}}
-setInterval(updateStatus,1000);setInterval(loadLiveMap,3000);loadMapInfo();refreshMap();addLog('Panel loaded.');
+setInterval(updateStatus,1000);setInterval(loadLiveMap,3000);loadMapInfo();refreshMap();startCameraLive();addLog('Panel loaded.');
 </script></body></html>
