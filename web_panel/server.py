@@ -625,15 +625,18 @@ def api_goal():
 
 @app.route("/api/set_pose", methods=["POST"])
 def api_set_pose():
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal
     data = request.json or {}
-    x = float(data.get("x", 0))
-    y = float(data.get("y", 0))
+    x = finite_float(data.get("x", 0))
+    y = finite_float(data.get("y", 0))
+    yaw = finite_float(data.get("yaw", 0))
     msg = PoseWithCovarianceStamped()
     msg.header.frame_id = "map"
     msg.header.stamp = rospy.Time.now()
     msg.pose.pose.position.x = x
     msg.pose.pose.position.y = y
-    msg.pose.pose.orientation.w = 1.0
+    msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+    msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
     msg.pose.covariance = [
         0.25, 0, 0, 0, 0, 0,
         0, 0.25, 0, 0, 0, 0,
@@ -642,8 +645,19 @@ def api_set_pose():
         0, 0, 0, 0, 0.0, 0,
         0, 0, 0, 0, 0, 0.068,
     ]
-    pose_pub.publish(msg)
-    return jsonify({"ok": True, "x": x, "y": y})
+    with lock:
+        MANUAL_MODE = True
+        CURRENT_LINEAR_X = 0.0
+        CURRENT_ANGULAR_Z = 0.0
+        pending_goal = None
+        latest_goal = None
+    cancel_pub.publish(GoalID())
+    cmd_pub.publish(Twist())
+    for _ in range(3):
+        msg.header.stamp = rospy.Time.now()
+        pose_pub.publish(msg)
+        time.sleep(0.05)
+    return jsonify({"ok": True, "x": x, "y": y, "yaw": yaw, "manual_mode": MANUAL_MODE})
 
 
 @app.route("/api/takeover", methods=["POST"])
