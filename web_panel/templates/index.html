@@ -27,7 +27,9 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
 .box{background:#222;border-radius:8px;min-height:220px;display:flex;align-items:center;justify-content:center;color:#bbb;text-align:center;padding:20px}
 .box img{width:100%;display:block}
 .log-box{background:#0a0a1a;border-radius:6px;padding:8px;height:160px;overflow-y:auto;font-family:'Consolas',monospace;font-size:11px;color:#888}.log-box div{padding:1px 0}
-.map-box{position:relative;min-height:320px}.map-box img{max-height:100%;object-fit:contain}
+.map-box{position:relative;min-height:320px;display:block;padding:12px}.map-box img{max-height:100%;object-fit:contain;cursor:crosshair}
+.map-marker{position:absolute;width:14px;height:14px;border-radius:50%;border:2px solid #ffd166;background:#e94560;transform:translate(-50%,-50%);box-shadow:0 0 0 4px rgba(233,69,96,.22);pointer-events:none;display:none}
+.robot-marker{position:absolute;width:12px;height:12px;border-radius:50%;border:2px solid #4caf50;background:#16213e;transform:translate(-50%,-50%);pointer-events:none;display:none}
 .status-line{font-size:11px;color:#888;line-height:1.5;margin-top:8px;word-break:break-all}
 </style>
 </head>
@@ -73,7 +75,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
         <button class="btn bstop" style="flex:1" onclick="doTakeover()">Takeover</button>
         <button class="btn bgoal" style="flex:1" onclick="doResumeNav()">Resume Nav</button>
       </div>
-      <p style="font-size:11px;color:#888;margin-top:8px"><b>Takeover</b>: Stop nav, control directly<br><b>Resume Nav</b>: Restart nav, use goals</p>
+      <p style="font-size:11px;color:#888;margin-top:8px">Manual and navigation switch automatically.<br><b>Takeover</b> only cancels current goal; <b>Resume</b> only ensures nav nodes are running.</p>
     </div>
     <div class="card">
       <h2>Navigation Goal</h2>
@@ -94,18 +96,24 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
     <div class="card">
       <h2>Map</h2>
       <div class="box map-box">
-        <img id="mapImg" src="/api/map" onerror="this.style.display='none';document.getElementById('mapFallback').style.display='block';">
+        <img id="mapImg" src="/api/map" onclick="selectMapGoal(event)" onerror="this.style.display='none';document.getElementById('mapFallback').style.display='block';">
+        <div class="robot-marker" id="robotMarker"></div>
+        <div class="map-marker" id="goalMarker"></div>
         <div id="mapFallback" style="display:none">Map preview unavailable<br><small>Check /api/map or open RViz for live navigation.</small></div>
       </div>
-      <div class="status-line" id="mapStatus">Loading map preview...</div>
-      <button class="btn bnav" style="width:100%;margin-top:6px" onclick="refreshMap()">Refresh Map</button>
+      <div class="status-line" id="mapStatus">Click the map to select a goal in map coordinates.</div>
+      <div class="status-line" id="goalStatus">No map goal selected.</div>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button class="btn bgoal" style="flex:1" onclick="sendGoal()">Send Map Goal</button>
+        <button class="btn bnav" style="flex:1" onclick="refreshMap()">Refresh Map</button>
+      </div>
     </div>
   </div>
 </div>
 <div class="page" id="camera"><div class="grid2"><div class="card"><h2>Camera Feed</h2><div class="box"><img id="camImg" src="/api/camera" onerror="this.style.display='none';"></div><button class="btn bnav" onclick="refreshCamera()">Refresh</button></div></div></div>
 <div class="page" id="log"><div class="grid2"><div class="card"><h2>Log</h2><div class="log-box" id="logBox"></div></div></div></div>
 <script>
-const GEARS=[{l:0.10,a:0.50},{l:0.18,a:0.90},{l:0.28,a:1.30}];let speed=0.18,angSpeed=0.90,holdTimer=null,statusBusy=false;
+const GEARS=[{l:0.10,a:0.50},{l:0.18,a:0.90},{l:0.28,a:1.30}];let speed=0.18,angSpeed=0.90,holdTimer=null,statusBusy=false,mapInfo=null,latestStatus=null;
 function showTab(id){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector(`[onclick="showTab('${id}')"]`).classList.add('active');if(id==='camera') refreshCamera();if(id==='map') refreshMap();}
 function setGear(i){speed=GEARS[i].l;angSpeed=GEARS[i].a;document.getElementById('g1').className='btn bgear'+(i===0?' on':'');document.getElementById('g2').className='btn bgear'+(i===1?' on':'');document.getElementById('g3').className='btn bgear'+(i===2?' on':'');document.getElementById('gearLabel').textContent=i+1;document.getElementById('gearVal').textContent=speed.toFixed(2);addLog(`Gear ${i+1}: ${speed} m/s`)}
 setGear(1);
@@ -113,6 +121,12 @@ async function apiPost(url,data){const r=await fetch(url,{method:'POST',headers:
 async function apiGet(url){const r=await fetch(url);return await r.json();}
 function addLog(m){const b=document.getElementById('logBox');const t=new Date().toLocaleTimeString();b.innerHTML=`<div>[${t}] ${m}</div>`+b.innerHTML;if(b.children.length>200)b.removeChild(b.lastChild)}
 function fmtNavState(s){if(!s)return'nav state unavailable';const nodes=(s.nodes||[]).join(', ')||'none';return`move_base=${!!s.move_base} amcl=${!!s.amcl} map_server=${!!s.map_server} | nodes: ${nodes}`}
+function mapToPixel(x,y){if(!mapInfo)return null;return{x:(x-mapInfo.origin[0])/mapInfo.resolution,y:mapInfo.height-((y-mapInfo.origin[1])/mapInfo.resolution)}}
+function pixelToMap(px,py){return{x:mapInfo.origin[0]+px*mapInfo.resolution,y:mapInfo.origin[1]+(mapInfo.height-py)*mapInfo.resolution}}
+function placeMarker(id,x,y){const img=document.getElementById('mapImg');const marker=document.getElementById(id);if(!mapInfo||!img||!marker)return;const p=mapToPixel(x,y);const imgRect=img.getBoundingClientRect();const boxRect=img.parentElement.getBoundingClientRect();if(!p)return;marker.style.left=(imgRect.left-boxRect.left+(p.x/mapInfo.width)*imgRect.width)+'px';marker.style.top=(imgRect.top-boxRect.top+(p.y/mapInfo.height)*imgRect.height)+'px';marker.style.display='block'}
+function updateMapMarkers(){if(latestStatus&&latestStatus.pose)placeMarker('robotMarker',latestStatus.pose.x,latestStatus.pose.y);if(latestStatus&&latestStatus.goal)placeMarker('goalMarker',latestStatus.goal.x,latestStatus.goal.y)}
+async function loadMapInfo(){try{mapInfo=await apiGet('/api/map_info');updateMapMarkers();}catch(e){addLog('map info err: '+e.message)}}
+function selectMapGoal(e){if(!mapInfo)return;const img=e.currentTarget;const rect=img.getBoundingClientRect();const px=((e.clientX-rect.left)/rect.width)*mapInfo.width;const py=((e.clientY-rect.top)/rect.height)*mapInfo.height;const goal=pixelToMap(px,py);let yaw=parseFloat(document.getElementById('gyaw').value)||0;if(latestStatus&&latestStatus.pose){yaw=Math.atan2(goal.y-latestStatus.pose.y,goal.x-latestStatus.pose.x)}document.getElementById('gx').value=goal.x.toFixed(3);document.getElementById('gy').value=goal.y.toFixed(3);document.getElementById('gyaw').value=yaw.toFixed(3);document.getElementById('goalStatus').textContent=`Selected map goal: x=${goal.x.toFixed(3)}, y=${goal.y.toFixed(3)}, yaw=${yaw.toFixed(2)}. Press GO to navigate.`;placeMarker('goalMarker',goal.x,goal.y);addLog(`Map goal selected ${goal.x.toFixed(3)}, ${goal.y.toFixed(3)}`)}
 async function sendVel(lx,az){const j=await apiPost('/api/cmd_vel',{linear_x:lx,angular_z:az});addLog(`cmd_vel ${lx}, ${az}`);return j}
 function velocityForDir(dir){if(dir==='w')return[speed,0];if(dir==='s')return[-speed,0];if(dir==='a')return[0,angSpeed];if(dir==='d')return[0,-angSpeed];return[0,0];}
 function startHold(dir){if(holdTimer){clearInterval(holdTimer);holdTimer=null;}const v=velocityForDir(dir);sendVel(v[0],v[1]);holdTimer=setInterval(()=>sendVel(v[0],v[1]),100);}
@@ -121,10 +135,10 @@ function stopHold(){if(holdTimer){clearInterval(holdTimer);holdTimer=null;}manua
 async function sendStop(){await apiPost('/api/stop',{});addLog('STOP')}
 async function doTakeover(){const r=await apiPost('/api/takeover',{});document.getElementById('modeLabel').textContent='Manual';document.getElementById('modeLabel').style.color='#e94560';document.getElementById('mapStatus').textContent=fmtNavState(r.nav_state);addLog('Takeover: manual mode')}
 async function doResumeNav(){const r=await apiPost('/api/resume_nav',{});document.getElementById('modeLabel').textContent='Navigation';document.getElementById('modeLabel').style.color='#4caf50';document.getElementById('mapStatus').textContent=fmtNavState(r.nav_state);addLog('Resume nav')}
-async function sendGoal(){const x=parseFloat(document.getElementById('gx').value);const y=parseFloat(document.getElementById('gy').value);const yaw=parseFloat(document.getElementById('gyaw').value);const r=await apiPost('/api/goal',{x,y,yaw});addLog(`Goal: ${x}, ${y}`);document.getElementById('mapStatus').textContent=`goal ok | ${fmtNavState(r.nav_state)}`}
+async function sendGoal(){const x=parseFloat(document.getElementById('gx').value);const y=parseFloat(document.getElementById('gy').value);const yaw=parseFloat(document.getElementById('gyaw').value);const r=await apiPost('/api/goal',{x,y,yaw});addLog(`Goal: ${x}, ${y}`);document.getElementById('mapStatus').textContent=`goal ok | ${fmtNavState(r.nav_state)}`;document.getElementById('goalStatus').textContent=`Sent goal: x=${x.toFixed(3)}, y=${y.toFixed(3)}, yaw=${yaw.toFixed(2)}`;placeMarker('goalMarker',x,y)}
 async function resetPose(){await apiPost('/api/set_pose',{x:0,y:0});addLog('Pose reset to origin')}
 function refreshCamera(){const cam=document.getElementById('camImg');cam.style.display='block';cam.src='/api/camera?t='+Date.now();}
-async function refreshMap(){const map=document.getElementById('mapImg');const fallback=document.getElementById('mapFallback');map.style.display='block';fallback.style.display='none';map.src='/api/map?t='+Date.now();try{const d=await apiGet('/api/status');document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state)}catch(e){document.getElementById('mapStatus').textContent='map refresh failed: '+e.message}}
-async function updateStatus(){if(statusBusy)return;statusBusy=true;try{const d=await apiGet('/api/status');if(!d||!d.odom)return;document.getElementById('px').textContent=Number(d.odom.x||0).toFixed(3)+' m';document.getElementById('py').textContent=Number(d.odom.y||0).toFixed(3)+' m';document.getElementById('lv').textContent=Number(d.odom.linear||0).toFixed(3)+' m/s';document.getElementById('av').textContent=Number(d.odom.angular||0).toFixed(3)+' m/s';document.getElementById('cmdv').textContent=(d.current_cmd ? (Number(d.current_cmd.linear_x||0).toFixed(2)+', '+Number(d.current_cmd.angular_z||0).toFixed(2)) : '--');document.getElementById('modeLabel').textContent=d.manual_mode===false?'Navigation':'Manual';document.getElementById('modeLabel').style.color=d.manual_mode===false?'#4caf50':'#e94560';document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state);}catch(e){addLog('status err: '+e.message)}finally{statusBusy=false;}}
-setInterval(updateStatus,1500);refreshMap();refreshCamera();addLog('Panel loaded.');
+async function refreshMap(){const map=document.getElementById('mapImg');const fallback=document.getElementById('mapFallback');map.style.display='block';fallback.style.display='none';map.src='/api/map?t='+Date.now();await loadMapInfo();try{const d=await apiGet('/api/status');latestStatus=d;document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state);updateMapMarkers();}catch(e){document.getElementById('mapStatus').textContent='map refresh failed: '+e.message}}
+async function updateStatus(){if(statusBusy)return;statusBusy=true;try{const d=await apiGet('/api/status');latestStatus=d;if(!d||!d.odom)return;const pose=d.pose||d.odom;document.getElementById('px').textContent=Number(pose.x||0).toFixed(3)+' m';document.getElementById('py').textContent=Number(pose.y||0).toFixed(3)+' m';document.getElementById('lv').textContent=Number(d.odom.linear||0).toFixed(3)+' m/s';document.getElementById('av').textContent=Number(d.odom.angular||0).toFixed(3)+' m/s';document.getElementById('cmdv').textContent=(d.current_cmd ? (Number(d.current_cmd.linear_x||0).toFixed(2)+', '+Number(d.current_cmd.angular_z||0).toFixed(2)) : '--');document.getElementById('modeLabel').textContent=d.manual_mode===false?'Navigation':'Manual';document.getElementById('modeLabel').style.color=d.manual_mode===false?'#4caf50':'#e94560';document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state)+' | move_base: '+((d.move_base_status&&d.move_base_status.text)||'--');updateMapMarkers();}catch(e){addLog('status err: '+e.message)}finally{statusBusy=false;}}
+setInterval(updateStatus,1500);loadMapInfo();refreshMap();refreshCamera();addLog('Panel loaded.');
 </script></body></html>

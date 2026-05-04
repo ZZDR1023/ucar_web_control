@@ -2065,3 +2065,50 @@ status fetch 挂起
 ```
 
 以后 Web 控制接口必须遵守：高频按钮接口只做内存赋值或 ROS publish，不要同步跑慢 shell、sleep、launch 或等待节点。
+
+---
+
+## 33. Web Goal 使用 odom 坐标会导致导航偏差、转圈或不到目标
+
+### 问题
+
+网页 `Status` 里早期显示的是 `/odom` 坐标，但 `GO` 发布到 `/move_base_simple/goal` 的 frame 是 `map`。
+
+### 现象
+
+- 点 `GO` 后 move_base 有反应；
+- 小车会转圈、短距离前进，但不能稳定到达预期目标；
+- 用户按页面显示的 X/Y 填目标时，目标实际不在 map 坐标系中的预期位置。
+
+### 原因
+
+`/odom` 是局部里程计坐标，`/move_base_simple/goal` 使用的是 `map` 坐标。两者不是同一个坐标系。实测同一时刻：
+
+```text
+odom: x=1.952, y=0.249
+map/amcl_pose: x=0.482, y=0.102
+```
+
+如果把 odom 数值当 map goal 发出去，导航目标会偏移。
+
+### 解决方法
+
+- 后端订阅 `/amcl_pose`，`/api/status` 返回 `pose` 作为 map 坐标；
+- 前端状态面板改为优先显示 `pose`；
+- 新增 `/api/map_info` 返回地图 origin、resolution、width、height；
+- Map 页面支持点击地图选点，自动换算为 ROS map 坐标并填入 X/Y；
+- 点击地图时根据当前 AMCL 位姿自动计算 yaw，使目标朝向大致指向目标点；
+- `Takeover` / `Resume Nav` 不再 kill/restart 导航节点，只切换控制状态或确保导航节点存在。
+
+### 以后如何避免/更好使用
+
+网页上所有导航目标都必须使用 `map` 坐标，不能用 `/odom` 坐标直接填 goal。
+
+导航节点应该常驻。手动控制和导航切换应通过：
+
+```text
+手动控制：cancel 当前 move_base goal + 发布 /cmd_vel
+导航控制：停止手动 /cmd_vel 循环 + 发布 /move_base_simple/goal
+```
+
+不要为了切换模式频繁 kill/restart `move_base`、`amcl` 或 `map_server`，否则定位和代价地图状态会被破坏。

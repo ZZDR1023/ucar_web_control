@@ -12,6 +12,7 @@ from flask import Flask, Response, jsonify, request, render_template
 
 import rospy
 from actionlib_msgs.msg import GoalID
+from actionlib_msgs.msg import GoalStatusArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from nav_msgs.msg import Odometry
 
@@ -22,6 +23,9 @@ CURRENT_LINEAR_X = 0.0
 CURRENT_ANGULAR_Z = 0.0
 lock = threading.Lock()
 latest_odom = {"x": 0.0, "y": 0.0, "linear": 0.0, "angular": 0.0}
+latest_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+latest_goal = None
+latest_move_base_status = {"code": None, "text": "no status"}
 latest_nav_state = {
     "move_base": False,
     "amcl": False,
@@ -37,6 +41,12 @@ MAP_PREVIEW_CANDIDATES = [
     "/home/ucar/ucar_ws/maps/ucar_map_20260501_202713_preview.png",
     os.path.abspath(os.path.join(BASE_DIR, "..", "maps", "ucar_map_20260501_202713_preview.png")),
 ]
+MAP_INFO = {
+    "resolution": 0.05,
+    "origin": [-10.435738, -11.509830, 0.0],
+    "width": 453,
+    "height": 430,
+}
 
 rospy.init_node("web_panel_server", anonymous=True, disable_signals=True)
 cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
@@ -56,6 +66,30 @@ def odom_cb(msg):
 rospy.Subscriber("/odom", Odometry, odom_cb)
 
 
+def quat_to_yaw(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def amcl_cb(msg):
+    with lock:
+        latest_pose["x"] = msg.pose.pose.position.x
+        latest_pose["y"] = msg.pose.pose.position.y
+        latest_pose["yaw"] = quat_to_yaw(msg.pose.pose.orientation)
+
+
+def move_base_status_cb(msg):
+    global latest_move_base_status
+    if msg.status_list:
+        status = msg.status_list[-1]
+        latest_move_base_status = {"code": status.status, "text": status.text}
+    else:
+        latest_move_base_status = {"code": None, "text": "no active move_base goal"}
+
+
+rospy.Subscriber("/amcl_pose", PoseWithCovarianceStamped, amcl_cb)
+rospy.Subscriber("/move_base/status", GoalStatusArray, move_base_status_cb)
+
+
 def cmd_loop():
     rate = rospy.Rate(20)
     while not rospy.is_shutdown():
@@ -65,7 +99,10 @@ def cmd_loop():
             msg.linear.x = CURRENT_LINEAR_X
             msg.angular.z = CURRENT_ANGULAR_Z
         if manual_mode:
-            cmd_pub.publish(msg)
+            try:
+                cmd_pub.publish(msg)
+            except rospy.ROSException:
+                break
         rate.sleep()
 
 
@@ -191,6 +228,13 @@ def publish_pending_goal():
         publish_goal_msg(msg)
 
 
+def stop_manual_command():
+    global CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    with lock:
+        CURRENT_LINEAR_X = 0.0
+        CURRENT_ANGULAR_Z = 0.0
+
+
 @app.after_request
 def no_cache(resp):
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -208,12 +252,16 @@ def index():
 def api_status():
     with lock:
         odom = dict(latest_odom)
+        pose = dict(latest_pose)
         current_cmd = {"linear_x": CURRENT_LINEAR_X, "angular_z": CURRENT_ANGULAR_Z}
     return jsonify({
         "odom": odom,
+        "pose": pose,
         "trajectory": [],
         "manual_mode": MANUAL_MODE,
         "current_cmd": current_cmd,
+        "goal": latest_goal,
+        "move_base_status": latest_move_base_status,
         "nav_state": latest_nav_state,
     })
 
@@ -225,6 +273,11 @@ def api_map():
             with open(path, "rb") as fh:
                 return Response(fh.read(), mimetype="image/png")
     return jsonify({"ok": False, "error": "map preview not found", "paths": MAP_PREVIEW_CANDIDATES}), 404
+
+
+@app.route("/api/map_info")
+def api_map_info():
+    return jsonify(MAP_INFO)
 
 
 @app.route("/api/camera")
@@ -297,7 +350,7 @@ def api_stop():
 
 @app.route("/api/goal", methods=["POST"])
 def api_goal():
-    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal
     data = request.json or {}
     x = finite_float(data.get("x", 0))
     y = finite_float(data.get("y", 0))
@@ -308,6 +361,7 @@ def api_goal():
         CURRENT_LINEAR_X = 0.0
         CURRENT_ANGULAR_Z = 0.0
         pending_goal = msg
+        latest_goal = {"x": x, "y": y, "yaw": yaw}
     nav_state = latest_nav_state
     nav_ready = nav_state["move_base"] and nav_state["amcl"] and nav_state["map_server"]
     started_nav = False
@@ -353,27 +407,26 @@ def api_set_pose():
 @app.route("/api/takeover", methods=["POST"])
 def api_takeover():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
-    MANUAL_MODE = True
     with lock:
+        MANUAL_MODE = True
         CURRENT_LINEAR_X = 0.0
         CURRENT_ANGULAR_Z = 0.0
-    kill_nav_processes()
-    time.sleep(1)
+    cancel_pub.publish(GoalID())
+    cmd_pub.publish(Twist())
     return jsonify({"ok": True, "mode": "manual", "nav_state": latest_nav_state})
 
 
 @app.route("/api/resume_nav", methods=["POST"])
 def api_resume_nav():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
-    MANUAL_MODE = False
     with lock:
+        MANUAL_MODE = False
         CURRENT_LINEAR_X = 0.0
         CURRENT_ANGULAR_Z = 0.0
-    kill_nav_processes()
-    time.sleep(1)
-    debug = start_nav_processes()
-    time.sleep(3)
-    return jsonify({"ok": True, "mode": "nav", "debug": debug, "nav_state": latest_nav_state})
+    started_nav = False
+    if not (latest_nav_state["move_base"] and latest_nav_state["amcl"] and latest_nav_state["map_server"]):
+        started_nav = start_nav_async()
+    return jsonify({"ok": True, "mode": "nav", "started_nav": started_nav, "nav_state": latest_nav_state})
 
 
 @app.route("/api/clear_trajectory", methods=["POST"])
@@ -382,4 +435,8 @@ def api_clear_trajectory():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, threaded=True)
+    port = int(os.environ.get("WEB_PANEL_PORT", "8080"))
+    probe = subprocess.run(["bash", "-lc", "ss -ltn | grep -q ':{} '".format(port)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if probe.returncode == 0:
+        raise SystemExit("port {} already in use".format(port))
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)

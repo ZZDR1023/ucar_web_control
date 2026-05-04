@@ -1334,6 +1334,7 @@ http://10.90.122.179:8080
 - `Resume Nav` 恢复导航
 - 输入目标点坐标并发送 `/move_base_simple/goal`
 - Map 页查看封门地图预览和导航节点状态
+- Map 页点击地图可选择目标点，自动换算为 `map` 坐标并填入 X/Y
 
 当前已知限制：
 
@@ -1342,6 +1343,7 @@ http://10.90.122.179:8080
 - 如果网页按钮要直接控车，必须先点 `Takeover`，避免 `move_base` 继续占用 `/cmd_vel`。
 - 如果 `GO` 后没有反应，先看 Map 页状态是否为 `move_base=true amcl=true map_server=true`。
 - 高频移动按钮应走 `/api/cmd_vel` 和 `/api/manual_stop` 这类轻量接口，不要走会同步杀导航/等待 ROS 的慢接口。
+- 页面状态里的位置应以 `/amcl_pose` 的 `map` 坐标为准；不要把 `/odom` 坐标直接当导航目标。
 
 ### 8. x11vnc 断线后的恢复
 
