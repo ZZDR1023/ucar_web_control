@@ -1346,6 +1346,8 @@ http://10.90.122.179:8080
 - 页面状态里的位置应以 `/amcl_pose` 的 `map` 坐标为准；不要把 `/odom` 坐标直接当导航目标。
 - Map 页会显示 `/scan` 雷达状态；全局导航仍使用封门地图，雷达用于 local costmap 动态避障。
 - Map 页已内嵌 Camera，并显示 `goal distance` / `reissues`；如果 goal 被 move_base 提前结束，后端会自动补发最近目标。
+- Map 页黄色点是实时 `/scan` 雷达命中点。普通点击设置新目标点，`Shift + 点击` 或右键设置目标朝向。
+- Web 层前方急停使用窄扇区：`stop < 0.40m`，`clear > 0.65m`。如果障碍还在正前方，重新发 goal 也会被安全逻辑取消。
 - 顶部和 Status 卡片会显示 `/battery_state` 电量；低于 20% 变红，10 秒没有新数据会显示 `stale`，完全没有话题则显示 `Battery no data`。
 
 ### 8. x11vnc 断线后的恢复

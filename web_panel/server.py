@@ -39,7 +39,14 @@ latest_goal = None
 latest_move_base_status = {"code": None, "text": "no status"}
 latest_scan = {"seen": False, "stamp": 0.0, "range_min": 0.0, "range_max": 0.0, "sample_count": 0}
 latest_scan_points = []
-latest_forward_obstacle = {"blocked": False, "min_distance": None, "threshold": 0.35}
+latest_forward_obstacle = {
+    "blocked": False,
+    "stop_active": False,
+    "min_distance": None,
+    "stop_distance": 0.40,
+    "clear_distance": 0.65,
+    "half_angle_deg": 18.0,
+}
 latest_live_map = None
 latest_goal_distance = None
 latest_nav_state = {
@@ -69,8 +76,9 @@ MAP_INFO = {
     "width": 453,
     "height": 430,
 }
-FRONT_STOP_DISTANCE = 0.55
-FRONT_STOP_HALF_ANGLE = math.radians(28)
+FRONT_STOP_DISTANCE = 0.40
+FRONT_CLEAR_DISTANCE = 0.65
+FRONT_STOP_HALF_ANGLE = math.radians(18)
 BATTERY_STALE_SECONDS = 10.0
 
 rospy.init_node("web_panel_server", anonymous=True, disable_signals=True)
@@ -139,6 +147,7 @@ def scan_cb(msg):
     global latest_scan, latest_scan_points, latest_forward_obstacle
     points = []
     front_min = None
+    was_blocked = latest_forward_obstacle.get("blocked", False)
     with lock:
         pose = dict(latest_pose)
     angle = msg.angle_min
@@ -157,10 +166,17 @@ def scan_cb(msg):
             })
         angle += msg.angle_increment
     latest_scan_points = points
+    if was_blocked:
+        blocked = front_min is not None and front_min < FRONT_CLEAR_DISTANCE
+    else:
+        blocked = front_min is not None and front_min < FRONT_STOP_DISTANCE
     latest_forward_obstacle = {
-        "blocked": front_min is not None and front_min < FRONT_STOP_DISTANCE,
+        "blocked": blocked,
+        "stop_active": blocked,
         "min_distance": front_min,
-        "threshold": FRONT_STOP_DISTANCE,
+        "stop_distance": FRONT_STOP_DISTANCE,
+        "clear_distance": FRONT_CLEAR_DISTANCE,
+        "half_angle_deg": math.degrees(FRONT_STOP_HALF_ANGLE),
     }
     latest_scan = {
         "seen": True,
@@ -409,17 +425,19 @@ threading.Thread(target=goal_watchdog_loop, daemon=True).start()
 
 def safety_loop():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    last_stop_time = 0.0
     while not rospy.is_shutdown():
         blocked = latest_forward_obstacle.get("blocked")
         with lock:
             manual_mode = MANUAL_MODE
-        if blocked and not manual_mode:
+        if blocked and not manual_mode and time.time() - last_stop_time > 0.8:
             with lock:
                 MANUAL_MODE = True
                 CURRENT_LINEAR_X = 0.0
                 CURRENT_ANGULAR_Z = 0.0
             cancel_pub.publish(GoalID())
             cmd_pub.publish(Twist())
+            last_stop_time = time.time()
         time.sleep(0.1)
 
 
