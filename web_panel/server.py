@@ -43,9 +43,11 @@ latest_forward_obstacle = {
     "blocked": False,
     "stop_active": False,
     "min_distance": None,
+    "box_min_distance": None,
     "stop_distance": 0.40,
     "clear_distance": 0.65,
     "half_angle_deg": 18.0,
+    "safety_box": {"front": 0.50, "rear": 0.05, "half_width": 0.30},
 }
 latest_live_map = None
 latest_goal_distance = None
@@ -79,6 +81,9 @@ MAP_INFO = {
 FRONT_STOP_DISTANCE = 0.40
 FRONT_CLEAR_DISTANCE = 0.65
 FRONT_STOP_HALF_ANGLE = math.radians(18)
+SAFETY_BOX_FRONT = 0.50
+SAFETY_BOX_REAR = 0.05
+SAFETY_BOX_HALF_WIDTH = 0.30
 BATTERY_STALE_SECONDS = 10.0
 
 rospy.init_node("web_panel_server", anonymous=True, disable_signals=True)
@@ -147,6 +152,7 @@ def scan_cb(msg):
     global latest_scan, latest_scan_points, latest_forward_obstacle
     points = []
     front_min = None
+    box_min = None
     was_blocked = latest_forward_obstacle.get("blocked", False)
     with lock:
         pose = dict(latest_pose)
@@ -158,6 +164,10 @@ def scan_cb(msg):
             continue
         if abs(angle) <= FRONT_STOP_HALF_ANGLE:
             front_min = distance if front_min is None else min(front_min, distance)
+        local_x = math.cos(angle) * distance
+        local_y = math.sin(angle) * distance
+        if -SAFETY_BOX_REAR <= local_x <= SAFETY_BOX_FRONT and abs(local_y) <= SAFETY_BOX_HALF_WIDTH:
+            box_min = distance if box_min is None else min(box_min, distance)
         if idx % step == 0 and distance <= 5.0:
             world_angle = pose["yaw"] + angle
             points.append({
@@ -167,16 +177,22 @@ def scan_cb(msg):
         angle += msg.angle_increment
     latest_scan_points = points
     if was_blocked:
-        blocked = front_min is not None and front_min < FRONT_CLEAR_DISTANCE
+        blocked = (front_min is not None and front_min < FRONT_CLEAR_DISTANCE) or box_min is not None
     else:
-        blocked = front_min is not None and front_min < FRONT_STOP_DISTANCE
+        blocked = (front_min is not None and front_min < FRONT_STOP_DISTANCE) or box_min is not None
     latest_forward_obstacle = {
         "blocked": blocked,
         "stop_active": blocked,
         "min_distance": front_min,
+        "box_min_distance": box_min,
         "stop_distance": FRONT_STOP_DISTANCE,
         "clear_distance": FRONT_CLEAR_DISTANCE,
         "half_angle_deg": math.degrees(FRONT_STOP_HALF_ANGLE),
+        "safety_box": {
+            "front": SAFETY_BOX_FRONT,
+            "rear": SAFETY_BOX_REAR,
+            "half_width": SAFETY_BOX_HALF_WIDTH,
+        },
     }
     latest_scan = {
         "seen": True,
@@ -278,8 +294,16 @@ def apply_nav_tuning():
         "export ROS_IP=10.90.122.179 && "
         "rosparam set /move_base/DWAPlannerROS/xy_goal_tolerance 0.08 && "
         "rosparam set /move_base/DWAPlannerROS/yaw_goal_tolerance 0.35 && "
-        "rosparam set /move_base/DWAPlannerROS/latch_xy_goal_tolerance true",
-        timeout=4,
+        "rosparam set /move_base/DWAPlannerROS/latch_xy_goal_tolerance true && "
+        "rosparam set /move_base/DWAPlannerROS/max_vel_x 0.18 && "
+        "rosparam set /move_base/DWAPlannerROS/max_trans_vel 0.18 && "
+        "rosparam set /move_base/DWAPlannerROS/min_vel_x 0.02 && "
+        "rosparam set /move_base/DWAPlannerROS/max_rot_vel 0.8 && "
+        "rosparam set /move_base/local_costmap/inflation_layer/inflation_radius 0.35 && "
+        "rosparam set /move_base/local_costmap/inflation_layer/cost_scaling_factor 3.0 && "
+        "rosparam set /move_base/global_costmap/inflation_layer/inflation_radius 0.35 && "
+        "rosparam set /move_base/global_costmap/inflation_layer/cost_scaling_factor 3.0",
+        timeout=12,
     )
 
 
