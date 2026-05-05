@@ -79,12 +79,50 @@ class LineFollowerTest(unittest.TestCase):
         self.assertEqual(result.linear_x, 0.0)
         self.assertEqual(result.angular_z, 0.0)
 
+    def test_far_yellow_line_in_top_of_roi_does_not_block_immediate_path(self):
+        frame = blank_frame(color=(170, 170, 170))
+        frame[:, 95:225] = (150, 150, 150)
+        draw_horizontal_line(frame, 116, 8, (0, 190, 190))
+        follower = LineFollower(LineFollowConfig(line_color="black", black_threshold=170, min_area=1000))
+
+        result = follower.process(frame)
+
+        self.assertTrue(result.detected)
+        self.assertFalse(result.forbidden_blocked)
+        self.assertGreater(result.linear_x, 0.0)
+
     def test_black_path_can_cross_red_dashed_line(self):
         frame = blank_frame(color=(170, 170, 170))
         draw_vertical_line(frame, 160, 20, (20, 20, 20))
         for x in range(0, frame.shape[1], 45):
             frame[182:188, x:x + 12] = (0, 0, 220)
         follower = LineFollower(LineFollowConfig(line_color="black", black_threshold=120))
+
+        result = follower.process(frame)
+
+        self.assertTrue(result.detected)
+        self.assertFalse(result.forbidden_blocked)
+        self.assertGreater(result.linear_x, 0.0)
+
+    def test_gray_drivable_road_is_detected_as_black_path_under_glare(self):
+        frame = blank_frame(color=(225, 225, 225))
+        frame[:, 95:225] = (150, 150, 150)
+        frame[:, 90:96] = (0, 190, 190)
+        frame[:, 224:230] = (0, 190, 190)
+        follower = LineFollower(LineFollowConfig(line_color="black", min_area=1000))
+
+        result = follower.process(frame)
+
+        self.assertTrue(result.detected)
+        self.assertFalse(result.forbidden_blocked)
+        self.assertAlmostEqual(result.center_x, 160, delta=10)
+
+    def test_close_parallel_yellow_lane_lines_do_not_block_center_path(self):
+        frame = blank_frame(color=(225, 225, 225))
+        frame[:, 135:185] = (150, 150, 150)
+        frame[:, 128:134] = (0, 190, 190)
+        frame[:, 186:192] = (0, 190, 190)
+        follower = LineFollower(LineFollowConfig(line_color="black", min_area=1000))
 
         result = follower.process(frame)
 

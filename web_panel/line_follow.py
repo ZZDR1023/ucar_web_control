@@ -28,7 +28,7 @@ class LineFollowConfig:
         linear_speed=0.06,
         angular_gain=0.45,
         min_area=250.0,
-        black_threshold=120.0,
+        black_threshold=170.0,
         enabled=False,
     ):
         self.line_color = line_color if line_color in SUPPORTED_COLORS else "black"
@@ -41,7 +41,7 @@ class LineFollowConfig:
         self.linear_speed = clamp(linear_speed, 0.0, 0.10)
         self.angular_gain = clamp(angular_gain, 0.0, 0.60)
         self.min_area = clamp(min_area, 20.0, 20000.0)
-        self.black_threshold = clamp(black_threshold, 60.0, 180.0)
+        self.black_threshold = clamp(black_threshold, 60.0, 230.0)
         self.enabled = bool(enabled)
 
     @classmethod
@@ -325,7 +325,10 @@ class LineFollower:
         if not points or not np.any(forbidden_mask):
             return False
         height, width = forbidden_mask.shape[:2]
+        near_field_start = int(height * 0.45)
         for x, y in points:
+            if y < near_field_start:
+                continue
             xi = int(round(x))
             yi = int(round(y))
             y0 = max(0, yi - 8)
