@@ -29,7 +29,7 @@ CURRENT_LINEAR_X = 0.0
 CURRENT_ANGULAR_Z = 0.0
 lock = threading.Lock()
 latest_odom = {"x": 0.0, "y": 0.0, "linear": 0.0, "angular": 0.0}
-latest_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+latest_pose = {"seen": False, "stamp": 0.0, "x": 0.0, "y": 0.0, "yaw": 0.0}
 latest_battery = {
     "seen": False,
     "stamp": 0.0,
@@ -154,6 +154,8 @@ def quat_to_yaw(q):
 
 def amcl_cb(msg):
     with lock:
+        latest_pose["seen"] = True
+        latest_pose["stamp"] = time.time()
         latest_pose["x"] = msg.pose.pose.position.x
         latest_pose["y"] = msg.pose.pose.position.y
         latest_pose["yaw"] = quat_to_yaw(msg.pose.pose.orientation)
@@ -349,8 +351,28 @@ def kill_nav_processes():
 
 
 def nav_nodes_running():
-    result = run_shell("rosnode list 2>/dev/null | grep -E '^/(move_base|amcl|map_server)$' || true")
-    nodes = [line.strip() for line in result["stdout"].splitlines() if line.strip()]
+    result = run_shell(
+        "source /opt/ros/melodic/setup.bash && "
+        "source /home/ucar/nav_clean_ws/devel/setup.bash && "
+        "export ROS_MASTER_URI=http://10.90.122.179:11311 && "
+        "export ROS_IP=10.90.122.179 && "
+        "rosnode list 2>/dev/null | grep -E '^/(move_base|amcl|map_server)$' || true",
+        timeout=6,
+    )
+    listed = [line.strip() for line in result["stdout"].splitlines() if line.strip()]
+    nodes = []
+    for node in ["/move_base", "/amcl", "/map_server"]:
+        if node not in listed:
+            continue
+        ping = run_shell(
+            "source /opt/ros/melodic/setup.bash && "
+            "export ROS_MASTER_URI=http://10.90.122.179:11311 && "
+            "export ROS_IP=10.90.122.179 && "
+            "rosnode ping -c 1 {} >/dev/null 2>&1".format(node),
+            timeout=4,
+        )
+        if ping["returncode"] == 0:
+            nodes.append(node)
     return {
         "move_base": "/move_base" in nodes,
         "amcl": "/amcl" in nodes,
@@ -805,7 +827,7 @@ def api_stop():
 
 @app.route("/api/goal", methods=["POST"])
 def api_goal():
-    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal, latest_nav_state
     data = request.json or {}
     x = finite_float(data.get("x", 0))
     y = finite_float(data.get("y", 0))
@@ -817,7 +839,8 @@ def api_goal():
         CURRENT_ANGULAR_Z = 0.0
         pending_goal = msg
         latest_goal = {"x": x, "y": y, "yaw": yaw}
-    nav_state = latest_nav_state
+    nav_state = nav_nodes_running()
+    latest_nav_state = nav_state
     nav_ready = nav_state["move_base"] and nav_state["amcl"] and nav_state["map_server"]
     started_nav = False
     if nav_ready:
@@ -887,11 +910,12 @@ def api_takeover():
 
 @app.route("/api/resume_nav", methods=["POST"])
 def api_resume_nav():
-    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, latest_nav_state
     with lock:
         MANUAL_MODE = False
         CURRENT_LINEAR_X = 0.0
         CURRENT_ANGULAR_Z = 0.0
+    latest_nav_state = nav_nodes_running()
     started_nav = False
     if not (latest_nav_state["move_base"] and latest_nav_state["amcl"] and latest_nav_state["map_server"]):
         started_nav = start_nav_async()
