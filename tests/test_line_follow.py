@@ -39,6 +39,23 @@ class LineFollowerTest(unittest.TestCase):
         self.assertLess(result.offset, -0.35)
         self.assertGreater(result.angular_z, 0.0)
 
+    def test_reflective_dark_gray_black_line_is_detected_with_threshold(self):
+        frame = draw_vertical_line(blank_frame(color=(155, 155, 155)), 155, 28, (105, 105, 105))
+        follower = LineFollower(LineFollowConfig(line_color="black", black_threshold=120))
+
+        result = follower.process(frame)
+
+        self.assertTrue(result.detected)
+        self.assertAlmostEqual(result.center_x, 155, delta=4)
+
+    def test_black_threshold_can_reject_gray_floor(self):
+        frame = draw_vertical_line(blank_frame(color=(155, 155, 155)), 155, 28, (105, 105, 105))
+        follower = LineFollower(LineFollowConfig(line_color="black", black_threshold=95))
+
+        result = follower.process(frame)
+
+        self.assertFalse(result.detected)
+
     def test_yellow_line_is_detected(self):
         frame = draw_vertical_line(blank_frame(), 170, 32, (0, 220, 220))
         follower = LineFollower(LineFollowConfig(line_color="yellow"))

@@ -28,6 +28,7 @@ class LineFollowConfig:
         linear_speed=0.06,
         angular_gain=0.45,
         min_area=250.0,
+        black_threshold=120.0,
         enabled=False,
     ):
         self.line_color = line_color if line_color in SUPPORTED_COLORS else "black"
@@ -40,6 +41,7 @@ class LineFollowConfig:
         self.linear_speed = clamp(linear_speed, 0.0, 0.10)
         self.angular_gain = clamp(angular_gain, 0.0, 0.60)
         self.min_area = clamp(min_area, 20.0, 20000.0)
+        self.black_threshold = clamp(black_threshold, 60.0, 180.0)
         self.enabled = bool(enabled)
 
     @classmethod
@@ -53,6 +55,7 @@ class LineFollowConfig:
             linear_speed=data.get("linear_speed", base.linear_speed),
             angular_gain=data.get("angular_gain", base.angular_gain),
             min_area=data.get("min_area", base.min_area),
+            black_threshold=data.get("black_threshold", base.black_threshold),
             enabled=data.get("enabled", base.enabled),
         )
 
@@ -64,6 +67,7 @@ class LineFollowConfig:
             "linear_speed": self.linear_speed,
             "angular_gain": self.angular_gain,
             "min_area": self.min_area,
+            "black_threshold": self.black_threshold,
             "enabled": self.enabled,
         }
 
@@ -175,7 +179,9 @@ class LineFollower:
         elif color == "yellow":
             mask = (r > 90) & (g > 85) & (b < 135) & (r > b + 20) & (g > b + 15) & (np.abs(r - g) < 110)
         else:
-            mask = (r < 85) & (g < 85) & (b < 85)
+            bright = np.maximum.reduce([r, g, b])
+            chroma = bright - np.minimum.reduce([r, g, b])
+            mask = (bright < self.config.black_threshold) & (chroma < 55)
         return mask
 
     def _extract_line_region(self, mask):
