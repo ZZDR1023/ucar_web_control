@@ -62,31 +62,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
       <div class="row"><span class="lbl">Linear</span><span class="val" id="lv">--</span></div>
       <div class="row"><span class="lbl">Angular</span><span class="val" id="av">--</span></div>
       <div class="row"><span class="lbl">Cmd</span><span class="val" id="cmdv">--</span></div>
-      <div class="row"><span class="lbl">Mode</span><span class="val" id="modeLabel" style="color:#e94560">Manual</span></div>
       <div class="row"><span class="lbl">Battery</span><span class="val" id="batteryVal">--</span></div>
-    </div>
-    <div class="card">
-      <h2>Control Mode</h2>
-      <div style="display:flex;gap:8px;margin-top:12px">
-        <button class="btn bstop" style="flex:1" onclick="doTakeover()">Takeover</button>
-        <button class="btn bgoal" style="flex:1" onclick="doResumeNav()">Resume Nav</button>
-      </div>
-      <p style="font-size:11px;color:#888;margin-top:8px">Manual and navigation switch automatically.<br><b>Takeover</b> only cancels current goal; <b>Resume</b> only ensures nav nodes are running.</p>
-    </div>
-    <div class="card">
-      <h2>Safety</h2>
-      <div class="safety-panel">
-        <div class="safety-tile" id="safeObstacle"><strong>Obstacle</strong><span id="safeObstacleVal">--</span></div>
-        <div class="safety-tile" id="safeBattery"><strong>Battery</strong><span id="safeBatteryVal">--</span></div>
-        <div class="safety-tile" id="safeFront"><strong>Front</strong><span id="safeFrontVal">--</span></div>
-        <div class="safety-tile" id="safeBox"><strong>Safety Box</strong><span id="safeBoxVal">--</span></div>
-      </div>
-      <div class="status-line" id="safeHint">Safety state waiting for /api/status...</div>
-    </div>
-    <div class="card">
-      <h2>Camera</h2>
-      <div class="box"><img id="camImg" src="/api/camera_stream" onerror="this.onerror=null;this.src='/api/camera?t='+Date.now();"></div>
-      <button class="btn bnav" style="width:100%;margin-top:6px" onclick="refreshCamera()">Refresh Camera</button>
     </div>
     <div class="card">
       <h2>Navigation Goal</h2>
@@ -102,27 +78,20 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
         <button class="btn bnav" onclick="fillCurrentPose()">Use Current</button>
       </div>
       <button class="btn bnav" style="width:100%;margin-top:6px" onclick="setInitialPose()">Set AMCL Pose Here</button>
-      <p style="font-size:11px;color:#888;margin-top:6px">Only use this for localization correction: select the robot's real position on the map first. Do not treat startup position as map origin.</p>
+      <p style="font-size:11px;color:#888;margin-top:6px">定位校正时使用：先在地图上点小车真实位置，再设置 AMCL 位姿。不要把启动位置当作地图原点。</p>
+    </div>
+    <div class="card">
+      <h2>Safety</h2>
+      <div class="safety-panel">
+        <div class="safety-tile" id="safeObstacle"><strong>Obstacle</strong><span id="safeObstacleVal">--</span></div>
+        <div class="safety-tile" id="safeBattery"><strong>Battery</strong><span id="safeBatteryVal">--</span></div>
+        <div class="safety-tile" id="safeFront"><strong>Front</strong><span id="safeFrontVal">--</span></div>
+        <div class="safety-tile" id="safeBox"><strong>Safety Box</strong><span id="safeBoxVal">--</span></div>
+      </div>
+      <div class="status-line" id="safeHint">Safety state waiting for /api/status...</div>
     </div>
     <div class="card">
       <h2>Map</h2>
-      <div class="box map-box">
-        <canvas id="mapCanvas" width="453" height="430" onclick="selectMapGoal(event)" oncontextmenu="setGoalYaw(event)" onmousemove="previewGoalYaw(event)" onwheel="zoomMap(event)"></canvas>
-        <div id="mapFallback" style="display:none">Map preview unavailable<br><small>Check /api/map or open RViz for live navigation.</small></div>
-      </div>
-      <div class="map-tools">
-        <button class="btn bnav" onclick="setMapZoom(mapZoom*1.2)">Zoom +</button>
-        <button class="btn bnav" onclick="setMapZoom(mapZoom/1.2)">Zoom -</button>
-        <button class="btn bgear" onclick="setMapZoom(1)">Reset</button>
-        <span id="zoomLabel">Zoom 100% · Ctrl + wheel</span>
-      </div>
-      <div class="status-line" id="mapStatus">Click the map to select a goal in map coordinates.</div>
-      <div class="status-line" id="scanStatus">Lidar obstacle layer: waiting for /scan...</div>
-      <div class="status-line" id="goalStatus">Click sets a new goal. Shift-click or right-click sets goal heading. Yellow points are live lidar hits.</div>
-      <div style="display:flex;gap:8px;margin-top:6px">
-        <button class="btn bgoal" style="flex:1" onclick="sendGoal()">Send Map Goal</button>
-        <button class="btn bnav" style="flex:1" onclick="refreshMap()">Refresh Map</button>
-      </div>
       <div class="patrol-panel">
         <h2>巡逻</h2>
         <div class="patrol-form">
@@ -141,6 +110,28 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-h
         </div>
         <div class="status-line" id="patrolStatus">巡逻状态：未加载</div>
       </div>
+      <div class="box map-box">
+        <canvas id="mapCanvas" width="453" height="430" onclick="selectMapGoal(event)" oncontextmenu="setGoalYaw(event)" onmousemove="previewGoalYaw(event)" onwheel="zoomMap(event)"></canvas>
+        <div id="mapFallback" style="display:none">Map preview unavailable<br><small>Check /api/map or open RViz for live navigation.</small></div>
+      </div>
+      <div class="map-tools">
+        <button class="btn bnav" onclick="setMapZoom(mapZoom*1.2)">Zoom +</button>
+        <button class="btn bnav" onclick="setMapZoom(mapZoom/1.2)">Zoom -</button>
+        <button class="btn bgear" onclick="setMapZoom(1)">Reset</button>
+        <span id="zoomLabel">Zoom 100% · Ctrl + wheel</span>
+      </div>
+      <div class="status-line" id="mapStatus">Click the map to select a goal in map coordinates.</div>
+      <div class="status-line" id="scanStatus">Lidar obstacle layer: waiting for /scan...</div>
+      <div class="status-line" id="goalStatus">Click sets a new goal. Shift-click or right-click sets goal heading. Yellow points are live lidar hits.</div>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button class="btn bgoal" style="flex:1" onclick="sendGoal()">Send Map Goal</button>
+        <button class="btn bnav" style="flex:1" onclick="refreshMap()">Refresh Map</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Camera</h2>
+      <div class="box"><img id="camImg" src="/api/camera_stream" onerror="this.onerror=null;this.src='/api/camera?t='+Date.now();"></div>
+      <button class="btn bnav" style="width:100%;margin-top:6px" onclick="refreshCamera()">Refresh Camera</button>
     </div>
     <div class="card">
       <h2>Log</h2>
@@ -179,8 +170,8 @@ function startHold(dir){if(holdTimer){clearInterval(holdTimer);holdTimer=null;}c
 async function manualStop(){await apiPost('/api/manual_stop',{});addLog('manual stop')}
 function stopHold(){if(holdTimer){clearInterval(holdTimer);holdTimer=null;}manualStop();}
 async function sendStop(){await apiPost('/api/stop',{});addLog('STOP')}
-async function doTakeover(){const r=await apiPost('/api/takeover',{});document.getElementById('modeLabel').textContent='Manual';document.getElementById('modeLabel').style.color='#e94560';document.getElementById('mapStatus').textContent=fmtNavState(r.nav_state);addLog('Takeover: manual mode')}
-async function doResumeNav(){const r=await apiPost('/api/resume_nav',{});document.getElementById('modeLabel').textContent='Navigation';document.getElementById('modeLabel').style.color='#4caf50';document.getElementById('mapStatus').textContent=fmtNavState(r.nav_state);addLog('Resume nav')}
+async function doTakeover(){const r=await apiPost('/api/takeover',{});document.getElementById('mapStatus').textContent=fmtNavState(r.nav_state);addLog('Takeover: manual mode')}
+async function doResumeNav(){const r=await apiPost('/api/resume_nav',{});document.getElementById('mapStatus').textContent=fmtNavState(r.nav_state);addLog('Resume nav')}
 async function sendGoal(){const x=parseFloat(document.getElementById('gx').value);const y=parseFloat(document.getElementById('gy').value);const yaw=parseFloat(document.getElementById('gyaw').value);selectedGoal={x,y,yaw};const r=await apiPost('/api/goal',{x,y,yaw});addLog(`Goal: ${x}, ${y}`);document.getElementById('mapStatus').textContent=`goal ok | ${fmtNavState(r.nav_state)}`;document.getElementById('goalStatus').textContent=`Sent goal: x=${x.toFixed(3)}, y=${y.toFixed(3)}, yaw=${yaw.toFixed(2)}`;drawLiveMap();}
 function fillCurrentPose(){if(!latestStatus||!latestStatus.pose){addLog('No AMCL pose yet');return;}document.getElementById('gx').value=latestStatus.pose.x.toFixed(3);document.getElementById('gy').value=latestStatus.pose.y.toFixed(3);document.getElementById('gyaw').value=latestStatus.pose.yaw.toFixed(3);addLog('Filled current map pose')}
 function relativeGoal(forward,left){if(!latestStatus||!latestStatus.pose){addLog('No AMCL pose yet');return;}const p=latestStatus.pose;const x=p.x+Math.cos(p.yaw)*forward-Math.sin(p.yaw)*left;const y=p.y+Math.sin(p.yaw)*forward+Math.cos(p.yaw)*left;selectedGoal={x,y,yaw:p.yaw};document.getElementById('gx').value=x.toFixed(3);document.getElementById('gy').value=y.toFixed(3);document.getElementById('gyaw').value=p.yaw.toFixed(3);document.getElementById('goalStatus').textContent=`Relative goal: x=${x.toFixed(3)}, y=${y.toFixed(3)}. Press GO to navigate.`;drawLiveMap();addLog(`Relative goal ${x.toFixed(3)}, ${y.toFixed(3)}`)}
@@ -203,6 +194,6 @@ async function refreshMap(){await loadMapInfo();await loadLiveMap();try{const d=
 function updateBattery(b){const pill=document.getElementById('batteryPill');const val=document.getElementById('batteryVal');const dot=document.getElementById('sd');if(!b||!b.seen){pill.textContent='Battery no data';val.textContent='no /battery_state';pill.className='battery-pill warn';dot.className='dot warn';return;}const pct=b.display_percentage===null||b.display_percentage===undefined?'--':Number(b.display_percentage).toFixed(0)+'%';const volt=b.voltage===null||b.voltage===undefined?'--':Number(b.voltage).toFixed(2)+'V';const stale=!!b.stale;const low=!!b.low;const suffix=stale?' stale':'';pill.textContent=`Battery ${pct} · ${volt}${suffix}`;val.textContent=`${pct} / ${volt}${stale?' / stale':''}`;pill.className='battery-pill'+(low?' low':(stale?' warn':''));dot.className='dot'+(low?' low':(stale?' warn':''));}
 function setTile(id,state,val){const el=document.getElementById(id);if(!el)return;el.className='safety-tile '+state;el.querySelector('span').textContent=val}
 function updateSafety(d){const obs=d.forward_obstacle||{};const b=d.battery||{};const front=obs.min_distance?Number(obs.min_distance).toFixed(2)+'m':'--';const box=obs.box_min_distance?Number(obs.box_min_distance).toFixed(2)+'m':'--';setTile('safeObstacle',obs.blocked?'danger':(obs.caution?'warn':''),obs.blocked?'BLOCKED':(obs.caution?'CAUTION':'CLEAR'));setTile('safeFront',obs.blocked?'danger':(obs.caution?'warn':''),front);setTile('safeBox',obs.blocked?'danger':(obs.caution?'warn':'muted'),box);const pct=b.display_percentage===null||b.display_percentage===undefined?'--':Number(b.display_percentage).toFixed(0)+'%';setTile('safeBattery',b.low?'danger':(b.stale||!b.seen?'warn':''),pct);document.getElementById('safeHint').textContent=obs.blocked?'Navigation is locked by Web safety stop. Clear the obstacle or press STOP.':(obs.caution?'Obstacle nearby. Navigation allowed, drive slowly.':'Safety clear.');}
-async function updateStatus(){if(statusBusy)return;statusBusy=true;try{const d=await apiGet('/api/status');latestStatus=d;if(d&&d.patrol)applyPatrolSnapshot(d.patrol);if(!d||!d.odom)return;const pose=d.pose||d.odom;document.getElementById('px').textContent=Number(pose.x||0).toFixed(3)+' m';document.getElementById('py').textContent=Number(pose.y||0).toFixed(3)+' m';document.getElementById('lv').textContent=Number(d.odom.linear||0).toFixed(3)+' m/s';document.getElementById('av').textContent=Number(d.odom.angular||0).toFixed(3)+' m/s';document.getElementById('cmdv').textContent=(d.current_cmd ? (Number(d.current_cmd.linear_x||0).toFixed(2)+', '+Number(d.current_cmd.angular_z||0).toFixed(2)) : '--');document.getElementById('modeLabel').textContent=d.manual_mode===false?'Navigation':'Manual';document.getElementById('modeLabel').style.color=d.manual_mode===false?'#4caf50':'#e94560';updateBattery(d.battery);updateSafety(d);const dist=(d.goal_distance===null||d.goal_distance===undefined)?'--':Number(d.goal_distance).toFixed(2)+'m';document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state)+' | move_base: '+((d.move_base_status&&d.move_base_status.text)||'--')+` | goal distance=${dist}, reissues=${d.auto_reissue_count||0}`;if(d.scan&&d.scan.seen){const age=((Date.now()/1000)-d.scan.stamp).toFixed(1);const obs=d.forward_obstacle||{};const min=obs.min_distance?Number(obs.min_distance).toFixed(2)+'m':'--';const box=obs.box_min_distance?Number(obs.box_min_distance).toFixed(2)+'m':'--';document.getElementById('scanStatus').textContent=`Lidar: yellow hits=${(d.scan_points||[]).length}, age=${age}s | front=${min}, safety-box=${box}, stop<${obs.stop_distance||'--'}m, clear>${obs.clear_distance||'--'}m, blocked=${!!obs.blocked}`;}else{document.getElementById('scanStatus').textContent='Lidar dynamic obstacle layer: no /scan received yet';}updateMapMarkers();}catch(e){addLog('status err: '+e.message)}finally{statusBusy=false;}}
+async function updateStatus(){if(statusBusy)return;statusBusy=true;try{const d=await apiGet('/api/status');latestStatus=d;if(d&&d.patrol)applyPatrolSnapshot(d.patrol);if(!d||!d.odom)return;const pose=d.pose||d.odom;document.getElementById('px').textContent=Number(pose.x||0).toFixed(3)+' m';document.getElementById('py').textContent=Number(pose.y||0).toFixed(3)+' m';document.getElementById('lv').textContent=Number(d.odom.linear||0).toFixed(3)+' m/s';document.getElementById('av').textContent=Number(d.odom.angular||0).toFixed(3)+' m/s';document.getElementById('cmdv').textContent=(d.current_cmd ? (Number(d.current_cmd.linear_x||0).toFixed(2)+', '+Number(d.current_cmd.angular_z||0).toFixed(2)) : '--');updateBattery(d.battery);updateSafety(d);const dist=(d.goal_distance===null||d.goal_distance===undefined)?'--':Number(d.goal_distance).toFixed(2)+'m';document.getElementById('mapStatus').textContent=fmtNavState(d.nav_state)+' | move_base: '+((d.move_base_status&&d.move_base_status.text)||'--')+` | goal distance=${dist}, reissues=${d.auto_reissue_count||0}`;if(d.scan&&d.scan.seen){const age=((Date.now()/1000)-d.scan.stamp).toFixed(1);const obs=d.forward_obstacle||{};const min=obs.min_distance?Number(obs.min_distance).toFixed(2)+'m':'--';const box=obs.box_min_distance?Number(obs.box_min_distance).toFixed(2)+'m':'--';document.getElementById('scanStatus').textContent=`Lidar: yellow hits=${(d.scan_points||[]).length}, age=${age}s | front=${min}, safety-box=${box}, stop<${obs.stop_distance||'--'}m, clear>${obs.clear_distance||'--'}m, blocked=${!!obs.blocked}`;}else{document.getElementById('scanStatus').textContent='Lidar dynamic obstacle layer: no /scan received yet';}updateMapMarkers();}catch(e){addLog('status err: '+e.message)}finally{statusBusy=false;}}
 setInterval(updateStatus,1000);setInterval(loadLiveMap,3000);loadMapInfo();refreshMap();loadPatrol();startCameraLive();addLog('Panel loaded.');
 </script></body></html>
