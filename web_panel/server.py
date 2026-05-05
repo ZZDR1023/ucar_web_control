@@ -22,6 +22,11 @@ try:
 except ImportError:
     from web_panel.patrol import PatrolManager, safe_name
 
+try:
+    from line_follow import LineFollowConfig, LineFollower, decode_jpeg, encode_jpeg
+except ImportError:
+    from web_panel.line_follow import LineFollowConfig, LineFollower, decode_jpeg, encode_jpeg
+
 app = Flask(__name__)
 
 MANUAL_MODE = True
@@ -96,6 +101,13 @@ camera_lock = threading.Lock()
 latest_camera_jpeg = None
 latest_camera_stamp = 0.0
 camera_clients = 0
+line_follow_lock = threading.Lock()
+line_follow_config = LineFollowConfig()
+line_follower = LineFollower(line_follow_config)
+latest_line_follow_result = line_follower.last_result
+latest_line_follow_debug_jpeg = None
+latest_line_follow_control = {"enabled": False, "active": False, "reason": "未启用"}
+LINE_FOLLOW_INTERVAL = 0.12
 PATROL_ROUTE_PATH = os.path.join(BASE_DIR, "patrol_route.json")
 PATROL_ROUTES_PATH = os.path.join(BASE_DIR, "patrol_routes.json")
 PATROL_RUNS_PATH = os.path.join(BASE_DIR, "patrol_runs.json")
@@ -281,6 +293,9 @@ def camera_loop():
     while not rospy.is_shutdown():
         with camera_lock:
             active = camera_clients > 0
+        with line_follow_lock:
+            line_follow_active = line_follow_config.enabled
+        active = active or line_follow_active
         if not active:
             if cap is not None:
                 cap.release()
@@ -310,6 +325,90 @@ def camera_loop():
 
 
 threading.Thread(target=camera_loop, daemon=True).start()
+
+
+def disable_line_follow(reason="已切换到其他控制"):
+    global line_follow_config, latest_line_follow_control
+    with line_follow_lock:
+        line_follow_config = LineFollowConfig.from_dict({"enabled": False}, line_follow_config)
+        line_follower.update_config(line_follow_config)
+        latest_line_follow_control = {"enabled": False, "active": False, "reason": reason}
+
+
+def line_follow_snapshot():
+    with line_follow_lock:
+        return {
+            "config": line_follow_config.to_dict(),
+            "result": latest_line_follow_result.to_dict(),
+            "control": dict(latest_line_follow_control),
+        }
+
+
+def process_line_follow_frame():
+    global latest_line_follow_result, latest_line_follow_debug_jpeg, latest_line_follow_control
+    with camera_lock:
+        frame_jpeg = latest_camera_jpeg
+        camera_stamp = latest_camera_stamp
+    if frame_jpeg is None:
+        with line_follow_lock:
+            latest_line_follow_result = line_follower.process(None)
+            latest_line_follow_control = {
+                "enabled": line_follow_config.enabled,
+                "active": False,
+                "reason": "没有摄像头画面",
+            }
+        return line_follow_snapshot()
+    try:
+        frame = decode_jpeg(frame_jpeg)
+    except Exception as exc:
+        with line_follow_lock:
+            latest_line_follow_control = {
+                "enabled": line_follow_config.enabled,
+                "active": False,
+                "reason": "摄像头画面解码失败: {}".format(exc),
+            }
+        return line_follow_snapshot()
+    with line_follow_lock:
+        line_follower.update_config(line_follow_config)
+        latest_line_follow_result = line_follower.process(frame)
+        if line_follower.last_debug_frame is not None:
+            latest_line_follow_debug_jpeg = encode_jpeg(line_follower.last_debug_frame, quality=78)
+        latest_line_follow_control = {
+            "enabled": line_follow_config.enabled,
+            "active": line_follow_config.enabled and latest_line_follow_result.detected,
+            "reason": latest_line_follow_result.message,
+            "camera_stamp": camera_stamp,
+        }
+    return line_follow_snapshot()
+
+
+def line_follow_loop():
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, latest_line_follow_control
+    while not rospy.is_shutdown():
+        with line_follow_lock:
+            enabled = line_follow_config.enabled
+        if not enabled:
+            time.sleep(0.2)
+            continue
+        if latest_forward_obstacle.get("blocked"):
+            with lock:
+                MANUAL_MODE = True
+                CURRENT_LINEAR_X = 0.0
+                CURRENT_ANGULAR_Z = 0.0
+            cmd_pub.publish(Twist())
+            disable_line_follow("前方障碍触发，巡线已停止")
+            time.sleep(0.2)
+            continue
+        snapshot = process_line_follow_frame()
+        result = snapshot["result"]
+        with lock:
+            MANUAL_MODE = True
+            CURRENT_LINEAR_X = result["linear_x"] if result["detected"] else 0.0
+            CURRENT_ANGULAR_Z = result["angular_z"] if result["detected"] else 0.0
+        time.sleep(LINE_FOLLOW_INTERVAL)
+
+
+threading.Thread(target=line_follow_loop, daemon=True).start()
 
 
 def cmd_loop():
@@ -720,6 +819,7 @@ def api_status():
         "forward_obstacle": latest_forward_obstacle,
         "nav_state": latest_nav_state,
         "patrol": patrol_manager.snapshot(),
+        "line_follow": line_follow_snapshot(),
     })
 
 
@@ -780,9 +880,77 @@ def api_camera_stream():
     return Response(frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
+@app.route("/api/line_follow/status")
+def api_line_follow_status():
+    snapshot = process_line_follow_frame()
+    snapshot["safety"] = {"forward_obstacle": latest_forward_obstacle}
+    return jsonify({"ok": True, "line_follow": snapshot})
+
+
+@app.route("/api/line_follow/debug.jpg")
+def api_line_follow_debug():
+    with line_follow_lock:
+        frame = latest_line_follow_debug_jpeg
+    if frame is None:
+        process_line_follow_frame()
+        with line_follow_lock:
+            frame = latest_line_follow_debug_jpeg
+    return Response(frame or offline_camera_jpeg(), mimetype="image/jpeg")
+
+
+@app.route("/api/line_follow/config", methods=["POST"])
+def api_line_follow_config():
+    global line_follow_config, MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    data = request.json or {}
+    next_config = LineFollowConfig.from_dict(data, line_follow_config)
+    if next_config.enabled:
+        patrol_mode = patrol_manager.snapshot()["state"]["mode"]
+        if patrol_mode in ("running", "blocked"):
+            return jsonify({
+                "ok": False,
+                "error": "巡逻正在运行，不能同时启用视觉巡线",
+                "line_follow": line_follow_snapshot(),
+            }), 409
+        if latest_forward_obstacle.get("blocked"):
+            next_config.enabled = False
+            with line_follow_lock:
+                line_follow_config = next_config
+                line_follower.update_config(line_follow_config)
+            return jsonify({
+                "ok": False,
+                "error": "前方障碍触发，不能启用视觉巡线",
+                "line_follow": line_follow_snapshot(),
+            }), 409
+        cancel_pub.publish(GoalID())
+        with lock:
+            MANUAL_MODE = True
+            CURRENT_LINEAR_X = 0.0
+            CURRENT_ANGULAR_Z = 0.0
+    with line_follow_lock:
+        line_follow_config = next_config
+        line_follower.update_config(line_follow_config)
+        latest_line_follow_control["enabled"] = line_follow_config.enabled
+        latest_line_follow_control["reason"] = "配置已更新"
+    snapshot = process_line_follow_frame()
+    return jsonify({"ok": True, "line_follow": snapshot})
+
+
+@app.route("/api/line_follow/stop", methods=["POST"])
+def api_line_follow_stop():
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    disable_line_follow("用户停止视觉巡线")
+    with lock:
+        MANUAL_MODE = True
+        CURRENT_LINEAR_X = 0.0
+        CURRENT_ANGULAR_Z = 0.0
+    cmd_pub.publish(Twist())
+    return jsonify({"ok": True, "line_follow": line_follow_snapshot()})
+
+
 @app.route("/api/cmd_vel", methods=["POST"])
 def api_cmd_vel():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    disable_line_follow("手动方向控制接管")
     data = request.json or {}
     lx = max(-0.5, min(0.5, float(data.get("linear_x", 0))))
     az = max(-2.0, min(2.0, float(data.get("angular_z", 0))))
@@ -801,6 +969,7 @@ def api_cmd_vel():
 @app.route("/api/manual_stop", methods=["POST"])
 def api_manual_stop():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    disable_line_follow("手动停止")
     with lock:
         MANUAL_MODE = True
         CURRENT_LINEAR_X = 0.0
@@ -813,6 +982,7 @@ def api_manual_stop():
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    disable_line_follow("STOP 停止")
     with lock:
         MANUAL_MODE = True
         CURRENT_LINEAR_X = 0.0
@@ -828,6 +998,7 @@ def api_stop():
 @app.route("/api/goal", methods=["POST"])
 def api_goal():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal, latest_nav_state
+    disable_line_follow("发送导航目标")
     data = request.json or {}
     x = finite_float(data.get("x", 0))
     y = finite_float(data.get("y", 0))
@@ -862,6 +1033,7 @@ def api_goal():
 @app.route("/api/set_pose", methods=["POST"])
 def api_set_pose():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal
+    disable_line_follow("设置 AMCL 位姿")
     data = request.json or {}
     x = finite_float(data.get("x", 0))
     y = finite_float(data.get("y", 0))
@@ -899,6 +1071,7 @@ def api_set_pose():
 @app.route("/api/takeover", methods=["POST"])
 def api_takeover():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    disable_line_follow("手动接管")
     with lock:
         MANUAL_MODE = True
         CURRENT_LINEAR_X = 0.0
@@ -911,6 +1084,7 @@ def api_takeover():
 @app.route("/api/resume_nav", methods=["POST"])
 def api_resume_nav():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, latest_nav_state
+    disable_line_follow("恢复导航")
     with lock:
         MANUAL_MODE = False
         CURRENT_LINEAR_X = 0.0
@@ -1003,6 +1177,7 @@ def api_patrol_load():
 @app.route("/api/patrol/start", methods=["POST"])
 def api_patrol_start():
     data = request.json or {}
+    disable_line_follow("启动巡逻")
     try:
         if data.get("route_name"):
             patrol_manager.load_named_route(data.get("route_name"))
@@ -1016,6 +1191,7 @@ def api_patrol_start():
 @app.route("/api/patrol/pause", methods=["POST"])
 def api_patrol_pause():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    disable_line_follow("暂停巡逻")
     patrol_manager.pause("operator paused patrol")
     with lock:
         MANUAL_MODE = True
@@ -1028,6 +1204,7 @@ def api_patrol_pause():
 @app.route("/api/patrol/resume", methods=["POST"])
 def api_patrol_resume():
     data = request.json or {}
+    disable_line_follow("恢复巡逻")
     try:
         if data.get("route_name") and not patrol_manager.snapshot()["points"]:
             patrol_manager.load_named_route(data.get("route_name"))
@@ -1041,6 +1218,7 @@ def api_patrol_resume():
 @app.route("/api/patrol/stop", methods=["POST"])
 def api_patrol_stop():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    disable_line_follow("停止巡逻")
     patrol_manager.stop("operator stopped patrol")
     with lock:
         MANUAL_MODE = True
