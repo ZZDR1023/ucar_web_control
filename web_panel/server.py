@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 
-from flask import Flask, Response, jsonify, request, render_template
+from flask import Flask, Response, jsonify, request, render_template, send_file
 
 import rospy
 from actionlib_msgs.msg import GoalID
@@ -97,11 +97,13 @@ latest_camera_jpeg = None
 latest_camera_stamp = 0.0
 camera_clients = 0
 PATROL_ROUTE_PATH = os.path.join(BASE_DIR, "patrol_route.json")
+PATROL_ROUTES_PATH = os.path.join(BASE_DIR, "patrol_routes.json")
+PATROL_RUNS_PATH = os.path.join(BASE_DIR, "patrol_runs.json")
 PATROL_CAPTURE_DIR = os.path.join(BASE_DIR, "patrol_captures")
 PATROL_REACHED_DISTANCE = 0.15
 PATROL_STATUS_REACHED_DISTANCE = 0.30
 PATROL_POINT_WAIT_SECONDS = 3.0
-patrol_manager = PatrolManager(PATROL_ROUTE_PATH)
+patrol_manager = PatrolManager(PATROL_ROUTE_PATH, routes_path=PATROL_ROUTES_PATH, runs_path=PATROL_RUNS_PATH)
 patrol_goal_publish_time = 0.0
 
 rospy.init_node("web_panel_server", anonymous=True, disable_signals=True)
@@ -901,6 +903,34 @@ def api_patrol():
     return jsonify({"ok": True, "patrol": patrol_manager.snapshot()})
 
 
+@app.route("/api/patrol/routes")
+def api_patrol_routes():
+    return jsonify({"ok": True, "routes": patrol_manager.list_routes(), "current_route_name": patrol_manager.current_route_name})
+
+
+@app.route("/api/patrol/runs")
+def api_patrol_runs():
+    return jsonify({"ok": True, "runs": patrol_manager.list_runs()})
+
+
+@app.route("/api/patrol/runs/<run_id>")
+def api_patrol_run(run_id):
+    try:
+        run = patrol_manager.get_run(run_id)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 404
+    return jsonify({"ok": True, "run": run})
+
+
+@app.route("/api/patrol/captures/<filename>")
+def api_patrol_capture(filename):
+    safe_filename = os.path.basename(filename)
+    path = os.path.join(PATROL_CAPTURE_DIR, safe_filename)
+    if not os.path.exists(path):
+        return jsonify({"ok": False, "error": "capture not found"}), 404
+    return send_file(path, mimetype="image/jpeg")
+
+
 @app.route("/api/patrol/points", methods=["POST"])
 def api_patrol_add_point():
     data = request.json or {}
@@ -927,13 +957,31 @@ def api_patrol_delete_point(index):
 
 @app.route("/api/patrol/save", methods=["POST"])
 def api_patrol_save():
-    return jsonify({"ok": True, "route": patrol_manager.save_route(), "patrol": patrol_manager.snapshot()})
+    data = request.json or {}
+    route_name = data.get("route_name")
+    try:
+        route = patrol_manager.save_named_route(route_name)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "patrol": patrol_manager.snapshot()}), 400
+    return jsonify({"ok": True, "route": route, "patrol": patrol_manager.snapshot()})
+
+
+@app.route("/api/patrol/load", methods=["POST"])
+def api_patrol_load():
+    data = request.json or {}
+    try:
+        route = patrol_manager.load_named_route(data.get("route_name"))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "patrol": patrol_manager.snapshot()}), 400
+    return jsonify({"ok": True, "route": route, "patrol": patrol_manager.snapshot()})
 
 
 @app.route("/api/patrol/start", methods=["POST"])
 def api_patrol_start():
     data = request.json or {}
     try:
+        if data.get("route_name"):
+            patrol_manager.load_named_route(data.get("route_name"))
         point = patrol_manager.start(data.get("start_index", 0))
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc), "patrol": patrol_manager.snapshot()}), 400
@@ -955,7 +1003,10 @@ def api_patrol_pause():
 
 @app.route("/api/patrol/resume", methods=["POST"])
 def api_patrol_resume():
+    data = request.json or {}
     try:
+        if data.get("route_name") and not patrol_manager.snapshot()["points"]:
+            patrol_manager.load_named_route(data.get("route_name"))
         point = patrol_manager.resume()
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc), "patrol": patrol_manager.snapshot()}), 400

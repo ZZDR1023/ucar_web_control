@@ -2669,3 +2669,78 @@ python3 server.py
 ```bash
 sudo systemctl restart ucar_web.service
 ```
+
+---
+
+## 45. Web 巡逻保存后恢复提示路线为空
+
+### 问题
+
+Web 巡逻界面点击“保存路线”后，日志显示已经保存，但后续点击“恢复”或“开始巡逻”时可能提示路线为空。
+
+### 原因
+
+早期实现只有一个临时路线文件：
+
+```text
+/home/ucar/web_panel/patrol_route.json
+```
+
+“保存路线”只是把当前内存中的点位写回这个文件，没有路线名称，也没有路线库。如果用户随后删除了当前列表里的点，或者 Web 服务重启时当前路线为空，就会出现：
+
+```text
+patrol route is empty
+```
+
+同时早期界面只有 Log 记录按钮结果，保存、加载、开始、恢复失败时缺少醒目的页面反馈。
+
+### 解决方法
+
+巡逻功能改为三层数据：
+
+```text
+patrol_route.json   # 当前正在编辑/加载的路线
+patrol_routes.json  # 已命名保存的路线库
+patrol_runs.json    # 每次巡逻执行记录
+```
+
+前端新增：
+
+- 路线名称输入框；
+- 已保存路线下拉框；
+- `加载路线`；
+- 巡逻反馈状态条；
+- 巡逻记录列表；
+- 点击记录查看路线点位和到点照片。
+
+后端新增：
+
+```text
+GET  /api/patrol/routes
+POST /api/patrol/load
+GET  /api/patrol/runs
+GET  /api/patrol/runs/<run_id>
+GET  /api/patrol/captures/<filename>
+```
+
+到巡逻点后，照片仍保存到：
+
+```text
+/home/ucar/web_panel/patrol_captures/
+```
+
+但现在会同时写入 `patrol_runs.json`，用于按巡逻记录查看。
+
+### 以后如何避免/更好使用
+
+正确流程：
+
+1. 在 Map 上点击目标点；
+2. 点击 `使用当前目标`；
+3. 输入点位名称；
+4. 点击 `添加巡逻点`；
+5. 输入路线名称；
+6. 点击 `保存路线`；
+7. 下次使用时先从下拉框选择路线，再点击 `加载路线` 或直接 `开始巡逻`。
+
+不要把“恢复”理解为“从磁盘恢复任意已保存路线”。恢复只用于暂停或阻塞后的当前巡逻任务继续执行；加载历史路线应使用 `加载路线`。

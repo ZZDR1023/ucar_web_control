@@ -10,7 +10,12 @@ class PatrolManagerTest(unittest.TestCase):
     def make_manager(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        return PatrolManager(Path(tmp.name) / "patrol_route.json")
+        root = Path(tmp.name)
+        return PatrolManager(
+            root / "patrol_route.json",
+            routes_path=root / "patrol_routes.json",
+            runs_path=root / "patrol_runs.json",
+        )
 
     def test_add_point_persists_route_without_starting_patrol(self):
         manager = self.make_manager()
@@ -111,6 +116,59 @@ class PatrolManagerTest(unittest.TestCase):
         self.assertEqual(state["mode"], "finished")
         self.assertEqual(state["current_index"], 1)
         self.assertEqual(state["captures"][-1]["point_name"], "desk")
+
+    def test_save_and_load_named_routes(self):
+        manager = self.make_manager()
+        manager.add_point("door", 1.0, 0.0, 0.0)
+        manager.add_point("desk", 2.0, 0.0, 1.57)
+
+        route = manager.save_named_route("morning")
+        self.assertEqual(route["name"], "morning")
+        self.assertEqual(len(route["points"]), 2)
+        self.assertEqual(manager.snapshot()["current_route_name"], "morning")
+
+        manager.delete_point(1)
+        self.assertEqual(len(manager.snapshot()["points"]), 1)
+
+        loaded = manager.load_named_route("morning")
+        self.assertEqual(len(loaded["points"]), 2)
+        self.assertEqual(manager.snapshot()["points"][1]["name"], "desk")
+        self.assertEqual(manager.list_routes()[0]["name"], "morning")
+
+    def test_route_name_is_required_when_saving_named_route(self):
+        manager = self.make_manager()
+        manager.add_point("door", 1.0, 0.0, 0.0)
+
+        with self.assertRaises(ValueError):
+            manager.save_named_route("")
+
+    def test_start_creates_run_and_captures_are_recorded(self):
+        manager = self.make_manager()
+        manager.add_point("door", 1.0, 0.0, 0.0)
+        manager.save_named_route("morning")
+
+        manager.start()
+        self.assertEqual(manager.snapshot()["state"]["run"]["route_name"], "morning")
+
+        manager.mark_current_reached(capture_path="/tmp/door.jpg")
+        snapshot = manager.snapshot()
+        run = snapshot["state"]["run"]
+        self.assertEqual(run["status"], "finished")
+        self.assertEqual(run["captures"][0]["path"], "/tmp/door.jpg")
+        self.assertEqual(run["captures"][0]["point_name"], "door")
+        self.assertEqual(manager.list_runs()[0]["id"], run["id"])
+
+    def test_stop_updates_active_run_status(self):
+        manager = self.make_manager()
+        manager.add_point("door", 1.0, 0.0, 0.0)
+        manager.save_named_route("morning")
+        manager.start()
+
+        manager.stop("operator stopped")
+
+        run = manager.snapshot()["state"]["run"]
+        self.assertEqual(run["status"], "stopped")
+        self.assertEqual(manager.list_runs()[0]["status"], "stopped")
 
 
 if __name__ == "__main__":
