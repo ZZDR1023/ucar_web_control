@@ -68,8 +68,8 @@ class LineFollowerTest(unittest.TestCase):
 
     def test_black_path_is_blocked_by_red_solid_line(self):
         frame = blank_frame(color=(170, 170, 170))
-        draw_vertical_line(frame, 160, 20, (20, 20, 20))
-        draw_horizontal_line(frame, 185, 8, (0, 0, 220))
+        draw_vertical_line(frame, 120, 20, (20, 20, 20))
+        draw_horizontal_line(frame, 225, 8, (0, 0, 220))
         follower = LineFollower(LineFollowConfig(line_color="black", black_threshold=120))
 
         result = follower.process(frame)
@@ -77,7 +77,19 @@ class LineFollowerTest(unittest.TestCase):
         self.assertTrue(result.detected)
         self.assertTrue(result.forbidden_blocked)
         self.assertEqual(result.linear_x, 0.0)
-        self.assertEqual(result.angular_z, 0.0)
+        self.assertGreater(result.angular_z, 0.0)
+
+    def test_red_line_above_bottom_contact_band_does_not_block(self):
+        frame = blank_frame(color=(170, 170, 170))
+        draw_vertical_line(frame, 160, 20, (20, 20, 20))
+        draw_horizontal_line(frame, 215, 8, (0, 0, 220))
+        follower = LineFollower(LineFollowConfig(line_color="black", black_threshold=120))
+
+        result = follower.process(frame)
+
+        self.assertTrue(result.detected)
+        self.assertFalse(result.forbidden_blocked)
+        self.assertGreater(result.linear_x, 0.0)
 
     def test_far_yellow_line_in_top_of_roi_does_not_block_immediate_path(self):
         frame = blank_frame(color=(170, 170, 170))

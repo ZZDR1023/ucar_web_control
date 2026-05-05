@@ -169,8 +169,6 @@ class LineFollower:
         angular_z = -offset * self.config.angular_gain
         angular_z = max(-0.60, min(0.60, angular_z))
         linear_x = 0.0 if forbidden_blocked else self.config.linear_speed
-        if forbidden_blocked:
-            angular_z = 0.0
         message = "红/黄实线过近，已禁止巡线控制" if forbidden_blocked else "已检测到路线"
         result = LineFollowResult(
             detected=True,
@@ -325,9 +323,13 @@ class LineFollower:
         if not points or not np.any(forbidden_mask):
             return False
         height, width = forbidden_mask.shape[:2]
-        near_field_start = int(height * 0.45)
+        contact_band_start = int(height * 0.94)
+        contact_mask = np.zeros_like(forbidden_mask, dtype=bool)
+        contact_mask[contact_band_start:, :] = forbidden_mask[contact_band_start:, :]
+        if not np.any(contact_mask):
+            return False
         for x, y in points:
-            if y < near_field_start:
+            if y < contact_band_start:
                 continue
             xi = int(round(x))
             yi = int(round(y))
@@ -335,7 +337,7 @@ class LineFollower:
             y1 = min(height, yi + 9)
             x0 = max(0, xi - 14)
             x1 = min(width, xi + 15)
-            if np.any(forbidden_mask[y0:y1, x0:x1]):
+            if np.any(contact_mask[y0:y1, x0:x1]):
                 return True
         return False
 
