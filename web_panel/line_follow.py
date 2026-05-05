@@ -82,6 +82,8 @@ class LineFollowResult:
         area=0.0,
         linear_x=0.0,
         angular_z=0.0,
+        forbidden_blocked=False,
+        forbidden_area=0.0,
         message="no frame",
         stamp=None,
     ):
@@ -92,6 +94,8 @@ class LineFollowResult:
         self.area = float(area)
         self.linear_x = float(linear_x)
         self.angular_z = float(angular_z)
+        self.forbidden_blocked = bool(forbidden_blocked)
+        self.forbidden_area = float(forbidden_area)
         self.message = message
         self.stamp = stamp if stamp is not None else time.time()
 
@@ -104,6 +108,8 @@ class LineFollowResult:
             "area": self.area,
             "linear_x": self.linear_x,
             "angular_z": self.angular_z,
+            "forbidden_blocked": self.forbidden_blocked,
+            "forbidden_area": self.forbidden_area,
             "message": self.message,
             "stamp": self.stamp,
         }
@@ -132,17 +138,26 @@ class LineFollower:
         y2 = max(y1 + 1, min(height, y2))
         roi = frame[y1:y2, :, :3]
         mask = self._mask_for_color(roi, self.config.line_color)
-        line_mask = self._extract_line_region(mask)
+        forbidden_mask = self._solid_forbidden_mask(roi)
+        if self.config.line_color == "black":
+            line_mask, path_points = self._trace_black_path(mask)
+        else:
+            line_mask = self._extract_line_region(mask)
+            path_points = self._points_from_mask(line_mask)
         ys, xs = np.nonzero(line_mask)
         area = float(xs.size)
+        forbidden_blocked = self._path_touches_forbidden(path_points, forbidden_mask)
+        forbidden_area = float(forbidden_mask.sum())
 
-        debug = self._make_debug_frame(frame, line_mask, y1, y2, None, None)
+        debug = self._make_debug_frame(frame, line_mask, y1, y2, None, None, forbidden_mask)
         if area < self.config.min_area:
             result = LineFollowResult(
                 detected=False,
                 area=area,
                 linear_x=0.0,
                 angular_z=0.0,
+                forbidden_blocked=forbidden_blocked,
+                forbidden_area=forbidden_area,
                 message="未检测到足够面积的路线",
             )
             self.last_debug_frame = debug
@@ -153,17 +168,23 @@ class LineFollower:
         offset = (center_x - (width / 2.0)) / (width / 2.0)
         angular_z = -offset * self.config.angular_gain
         angular_z = max(-0.60, min(0.60, angular_z))
+        linear_x = 0.0 if forbidden_blocked else self.config.linear_speed
+        if forbidden_blocked:
+            angular_z = 0.0
+        message = "红/黄实线过近，已禁止巡线控制" if forbidden_blocked else "已检测到路线"
         result = LineFollowResult(
             detected=True,
             offset=offset,
             center_x=center_x,
             center_y=center_y,
             area=area,
-            linear_x=self.config.linear_speed,
+            linear_x=linear_x,
             angular_z=angular_z,
-            message="已检测到路线",
+            forbidden_blocked=forbidden_blocked,
+            forbidden_area=forbidden_area,
+            message=message,
         )
-        self.last_debug_frame = self._make_debug_frame(frame, line_mask, y1, y2, center_x, center_y)
+        self.last_debug_frame = self._make_debug_frame(frame, line_mask, y1, y2, center_x, center_y, forbidden_mask)
         return self._store_result(result)
 
     def _store_result(self, result):
@@ -190,6 +211,131 @@ class LineFollower:
             return component
         return self._extract_line_columns(mask)
 
+    def _trace_black_path(self, mask):
+        height, width = mask.shape[:2]
+        selected = np.zeros_like(mask, dtype=bool)
+        points = []
+        prev_x = width / 2.0
+        max_jump = max(24.0, width * 0.28)
+        min_run_width = 3
+        for y in range(height - 1, -1, -1):
+            runs = self._row_runs(mask[y], min_run_width)
+            if not runs:
+                continue
+            scored = []
+            for start, end in runs:
+                center = (start + end - 1) / 2.0
+                scored.append((abs(center - prev_x), center, start, end))
+            distance, center, start, end = min(scored, key=lambda item: item[0])
+            if not points and distance > max_jump:
+                continue
+            if points and distance > max_jump:
+                continue
+            selected[y, start:end] = True
+            points.append((center, y))
+            prev_x = center
+        min_path_rows = max(30, int(height * 0.25))
+        if len(points) < min_path_rows:
+            return np.zeros_like(mask, dtype=bool), []
+        return selected, points
+
+    def _row_runs(self, row, min_width):
+        runs = []
+        start = None
+        for idx, value in enumerate(row):
+            if value and start is None:
+                start = idx
+            elif not value and start is not None:
+                if idx - start >= min_width:
+                    runs.append((start, idx))
+                start = None
+        if start is not None and len(row) - start >= min_width:
+            runs.append((start, len(row)))
+        return runs
+
+    def _points_from_mask(self, mask):
+        points = []
+        ys, xs = np.nonzero(mask)
+        if ys.size == 0:
+            return points
+        for y in np.unique(ys):
+            row_xs = xs[ys == y]
+            points.append((float(row_xs.mean()), int(y)))
+        return points
+
+    def _solid_forbidden_mask(self, roi):
+        b = roi[:, :, 0].astype(np.int16)
+        g = roi[:, :, 1].astype(np.int16)
+        r = roi[:, :, 2].astype(np.int16)
+        red = (r > 120) & (r > g + 35) & (r > b + 35)
+        yellow = (r > 90) & (g > 85) & (b < 140) & (r > b + 20) & (g > b + 15) & (np.abs(r - g) < 120)
+        return self._solid_components(red | yellow)
+
+    def _solid_components(self, mask):
+        solid = np.zeros_like(mask, dtype=bool)
+        for component in self._component_masks(mask):
+            ys, xs = np.nonzero(component)
+            if ys.size == 0:
+                continue
+            width = int(xs.max() - xs.min() + 1)
+            height = int(ys.max() - ys.min() + 1)
+            area = int(ys.size)
+            if area >= 120 and max(width, height) >= 45:
+                solid |= component
+        return solid
+
+    def _component_masks(self, mask):
+        try:
+            import cv2
+            labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype("uint8"), 8)
+            components = []
+            for label in range(1, labels_count):
+                if stats[label, cv2.CC_STAT_AREA] > 0:
+                    components.append(labels == label)
+            return components
+        except Exception:
+            return self._component_masks_fallback(mask)
+
+    def _component_masks_fallback(self, mask):
+        visited = np.zeros_like(mask, dtype=bool)
+        components = []
+        height, width = mask.shape[:2]
+        for y, x in zip(*np.nonzero(mask)):
+            if visited[y, x]:
+                continue
+            stack = [(int(y), int(x))]
+            visited[y, x] = True
+            coords = []
+            while stack:
+                cy, cx = stack.pop()
+                coords.append((cy, cx))
+                for ny in range(max(0, cy - 1), min(height, cy + 2)):
+                    for nx in range(max(0, cx - 1), min(width, cx + 2)):
+                        if not visited[ny, nx] and mask[ny, nx]:
+                            visited[ny, nx] = True
+                            stack.append((ny, nx))
+            component = np.zeros_like(mask, dtype=bool)
+            if coords:
+                cy, cx = zip(*coords)
+                component[list(cy), list(cx)] = True
+                components.append(component)
+        return components
+
+    def _path_touches_forbidden(self, points, forbidden_mask):
+        if not points or not np.any(forbidden_mask):
+            return False
+        height, width = forbidden_mask.shape[:2]
+        for x, y in points:
+            xi = int(round(x))
+            yi = int(round(y))
+            y0 = max(0, yi - 8)
+            y1 = min(height, yi + 9)
+            x0 = max(0, xi - 14)
+            x1 = min(width, xi + 15)
+            if np.any(forbidden_mask[y0:y1, x0:x1]):
+                return True
+        return False
+
     def _largest_component(self, mask):
         try:
             import cv2
@@ -211,10 +357,12 @@ class LineFollower:
             return np.zeros_like(mask, dtype=bool)
         return mask & good_columns.reshape(1, -1)
 
-    def _make_debug_frame(self, frame, mask, y1, y2, center_x, center_y):
+    def _make_debug_frame(self, frame, mask, y1, y2, center_x, center_y, forbidden_mask=None):
         debug = frame[:, :, :3].copy()
         height, width = debug.shape[:2]
         overlay = debug[y1:y2]
+        if forbidden_mask is not None and forbidden_mask.shape[:2] == overlay.shape[:2]:
+            overlay[forbidden_mask] = (255, 0, 255)
         if mask.shape[:2] == overlay.shape[:2]:
             overlay[mask] = (0, 0, 255)
         self._draw_horizontal(debug, y1, (255, 160, 0))

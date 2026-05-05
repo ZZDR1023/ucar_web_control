@@ -17,6 +17,12 @@ def draw_vertical_line(frame, x_center, width, color):
     return frame
 
 
+def draw_horizontal_line(frame, y_center, height, color):
+    half = height // 2
+    frame[max(0, y_center - half):min(frame.shape[0], y_center + half + 1), :] = color
+    return frame
+
+
 class LineFollowerTest(unittest.TestCase):
     def test_center_black_line_has_near_zero_offset(self):
         frame = draw_vertical_line(blank_frame(), 160, 28, (0, 0, 0))
@@ -47,6 +53,44 @@ class LineFollowerTest(unittest.TestCase):
 
         self.assertTrue(result.detected)
         self.assertAlmostEqual(result.center_x, 155, delta=4)
+
+    def test_black_path_tracing_ignores_dark_blob_far_from_bottom_center(self):
+        frame = blank_frame(color=(160, 160, 160))
+        draw_vertical_line(frame, 160, 20, (20, 20, 20))
+        frame[160:230, 5:75] = (15, 15, 15)
+        follower = LineFollower(LineFollowConfig(line_color="black", black_threshold=120))
+
+        result = follower.process(frame)
+
+        self.assertTrue(result.detected)
+        self.assertAlmostEqual(result.center_x, 160, delta=6)
+        self.assertLess(abs(result.offset), 0.08)
+
+    def test_black_path_is_blocked_by_red_solid_line(self):
+        frame = blank_frame(color=(170, 170, 170))
+        draw_vertical_line(frame, 160, 20, (20, 20, 20))
+        draw_horizontal_line(frame, 185, 8, (0, 0, 220))
+        follower = LineFollower(LineFollowConfig(line_color="black", black_threshold=120))
+
+        result = follower.process(frame)
+
+        self.assertTrue(result.detected)
+        self.assertTrue(result.forbidden_blocked)
+        self.assertEqual(result.linear_x, 0.0)
+        self.assertEqual(result.angular_z, 0.0)
+
+    def test_black_path_can_cross_red_dashed_line(self):
+        frame = blank_frame(color=(170, 170, 170))
+        draw_vertical_line(frame, 160, 20, (20, 20, 20))
+        for x in range(0, frame.shape[1], 45):
+            frame[182:188, x:x + 12] = (0, 0, 220)
+        follower = LineFollower(LineFollowConfig(line_color="black", black_threshold=120))
+
+        result = follower.process(frame)
+
+        self.assertTrue(result.detected)
+        self.assertFalse(result.forbidden_blocked)
+        self.assertGreater(result.linear_x, 0.0)
 
     def test_black_threshold_can_reject_gray_floor(self):
         frame = draw_vertical_line(blank_frame(color=(155, 155, 155)), 155, 28, (105, 105, 105))
