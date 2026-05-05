@@ -17,6 +17,11 @@ from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from sensor_msgs.msg import BatteryState, LaserScan
 
+try:
+    from patrol import PatrolManager, safe_name
+except ImportError:
+    from web_panel.patrol import PatrolManager, safe_name
+
 app = Flask(__name__)
 
 MANUAL_MODE = True
@@ -91,6 +96,13 @@ camera_lock = threading.Lock()
 latest_camera_jpeg = None
 latest_camera_stamp = 0.0
 camera_clients = 0
+PATROL_ROUTE_PATH = os.path.join(BASE_DIR, "patrol_route.json")
+PATROL_CAPTURE_DIR = os.path.join(BASE_DIR, "patrol_captures")
+PATROL_REACHED_DISTANCE = 0.15
+PATROL_STATUS_REACHED_DISTANCE = 0.30
+PATROL_POINT_WAIT_SECONDS = 3.0
+patrol_manager = PatrolManager(PATROL_ROUTE_PATH)
+patrol_goal_publish_time = 0.0
 
 rospy.init_node("web_panel_server", anonymous=True, disable_signals=True)
 cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
@@ -470,6 +482,56 @@ def publish_pending_goal():
         publish_goal_msg(msg)
 
 
+def set_navigation_goal_from_point(point):
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal, patrol_goal_publish_time
+    msg = make_goal_msg(point["x"], point["y"], point["yaw"])
+    with lock:
+        MANUAL_MODE = False
+        CURRENT_LINEAR_X = 0.0
+        CURRENT_ANGULAR_Z = 0.0
+        pending_goal = msg
+        latest_goal = {"x": point["x"], "y": point["y"], "yaw": point["yaw"]}
+    nav_ready = latest_nav_state["move_base"] and latest_nav_state["amcl"] and latest_nav_state["map_server"]
+    if nav_ready:
+        publish_goal_msg(msg)
+        patrol_goal_publish_time = time.time()
+        return True
+    start_nav_async()
+    patrol_goal_publish_time = time.time()
+    return False
+
+
+def distance_to_patrol_point(point):
+    with lock:
+        pose = dict(latest_pose)
+    return math.hypot(point["x"] - pose["x"], point["y"] - pose["y"])
+
+
+def save_patrol_capture(point, index):
+    with camera_lock:
+        frame = latest_camera_jpeg
+    if frame is None:
+        return None, "no camera frame available"
+    os.makedirs(PATROL_CAPTURE_DIR, exist_ok=True)
+    filename = "{}_{:02d}_{}.jpg".format(
+        time.strftime("%Y%m%d_%H%M%S"),
+        index,
+        safe_name(point["name"]),
+    )
+    path = os.path.join(PATROL_CAPTURE_DIR, filename)
+    with open(path, "wb") as fh:
+        fh.write(frame)
+    return path, None
+
+
+def cancel_navigation_and_stop():
+    cancel_pub.publish(GoalID())
+    stop_msg = Twist()
+    for _ in range(3):
+        cmd_pub.publish(stop_msg)
+        time.sleep(0.03)
+
+
 def goal_distance():
     with lock:
         goal = latest_goal
@@ -528,6 +590,57 @@ def safety_loop():
 threading.Thread(target=safety_loop, daemon=True).start()
 
 
+def patrol_loop():
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    while not rospy.is_shutdown():
+        snapshot = patrol_manager.snapshot()
+        state = snapshot["state"]
+        mode = state["mode"]
+        point = state["current_point"]
+        if mode == "running" and point:
+            if latest_forward_obstacle.get("blocked"):
+                patrol_manager.handle_blocked(True)
+                with lock:
+                    MANUAL_MODE = True
+                    CURRENT_LINEAR_X = 0.0
+                    CURRENT_ANGULAR_Z = 0.0
+                cancel_navigation_and_stop()
+                time.sleep(0.2)
+                continue
+
+            distance = distance_to_patrol_point(point)
+            status_code = latest_move_base_status.get("code")
+            status_reached = (
+                status_code == 3
+                and distance <= PATROL_STATUS_REACHED_DISTANCE
+                and time.time() - patrol_goal_publish_time > 1.0
+            )
+            if distance <= PATROL_REACHED_DISTANCE or status_reached:
+                with lock:
+                    CURRENT_LINEAR_X = 0.0
+                    CURRENT_ANGULAR_Z = 0.0
+                cmd_pub.publish(Twist())
+                index = state["current_index"] if state["current_index"] is not None else 0
+                capture_path, capture_error = save_patrol_capture(point, index)
+                next_point = patrol_manager.mark_current_reached(capture_path, capture_error)
+                if next_point is None:
+                    with lock:
+                        MANUAL_MODE = True
+                        CURRENT_LINEAR_X = 0.0
+                        CURRENT_ANGULAR_Z = 0.0
+                    cancel_navigation_and_stop()
+                else:
+                    time.sleep(PATROL_POINT_WAIT_SECONDS)
+                    if patrol_manager.snapshot()["state"]["mode"] == "running":
+                        set_navigation_goal_from_point(next_point)
+        elif mode == "blocked" and not latest_forward_obstacle.get("blocked"):
+            patrol_manager.handle_blocked(False)
+        time.sleep(0.2)
+
+
+threading.Thread(target=patrol_loop, daemon=True).start()
+
+
 def stop_manual_command():
     global CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
     with lock:
@@ -582,6 +695,7 @@ def api_status():
         "scan_points": latest_scan_points,
         "forward_obstacle": latest_forward_obstacle,
         "nav_state": latest_nav_state,
+        "patrol": patrol_manager.snapshot(),
     })
 
 
@@ -780,6 +894,85 @@ def api_resume_nav():
     if not (latest_nav_state["move_base"] and latest_nav_state["amcl"] and latest_nav_state["map_server"]):
         started_nav = start_nav_async()
     return jsonify({"ok": True, "mode": "nav", "started_nav": started_nav, "nav_state": latest_nav_state})
+
+
+@app.route("/api/patrol")
+def api_patrol():
+    return jsonify({"ok": True, "patrol": patrol_manager.snapshot()})
+
+
+@app.route("/api/patrol/points", methods=["POST"])
+def api_patrol_add_point():
+    data = request.json or {}
+    try:
+        point = patrol_manager.add_point(
+            data.get("name", ""),
+            data.get("x"),
+            data.get("y"),
+            data.get("yaw", 0.0),
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "patrol": patrol_manager.snapshot()}), 400
+    return jsonify({"ok": True, "point": point, "patrol": patrol_manager.snapshot()})
+
+
+@app.route("/api/patrol/points/<int:index>", methods=["DELETE"])
+def api_patrol_delete_point(index):
+    try:
+        deleted = patrol_manager.delete_point(index)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "patrol": patrol_manager.snapshot()}), 400
+    return jsonify({"ok": True, "deleted": deleted, "patrol": patrol_manager.snapshot()})
+
+
+@app.route("/api/patrol/save", methods=["POST"])
+def api_patrol_save():
+    return jsonify({"ok": True, "route": patrol_manager.save_route(), "patrol": patrol_manager.snapshot()})
+
+
+@app.route("/api/patrol/start", methods=["POST"])
+def api_patrol_start():
+    data = request.json or {}
+    try:
+        point = patrol_manager.start(data.get("start_index", 0))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "patrol": patrol_manager.snapshot()}), 400
+    nav_ready = set_navigation_goal_from_point(point)
+    return jsonify({"ok": True, "point": point, "nav_ready": nav_ready, "patrol": patrol_manager.snapshot()})
+
+
+@app.route("/api/patrol/pause", methods=["POST"])
+def api_patrol_pause():
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    patrol_manager.pause("operator paused patrol")
+    with lock:
+        MANUAL_MODE = True
+        CURRENT_LINEAR_X = 0.0
+        CURRENT_ANGULAR_Z = 0.0
+    cancel_navigation_and_stop()
+    return jsonify({"ok": True, "patrol": patrol_manager.snapshot()})
+
+
+@app.route("/api/patrol/resume", methods=["POST"])
+def api_patrol_resume():
+    try:
+        point = patrol_manager.resume()
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "patrol": patrol_manager.snapshot()}), 400
+    nav_ready = set_navigation_goal_from_point(point)
+    return jsonify({"ok": True, "point": point, "nav_ready": nav_ready, "patrol": patrol_manager.snapshot()})
+
+
+@app.route("/api/patrol/stop", methods=["POST"])
+def api_patrol_stop():
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    patrol_manager.stop("operator stopped patrol")
+    with lock:
+        MANUAL_MODE = True
+        CURRENT_LINEAR_X = 0.0
+        CURRENT_ANGULAR_Z = 0.0
+    cancel_navigation_and_stop()
+    return jsonify({"ok": True, "patrol": patrol_manager.snapshot()})
 
 
 @app.route("/api/clear_trajectory", methods=["POST"])

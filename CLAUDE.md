@@ -1,3 +1,5 @@
+项目文字规范：**默认使用中文写所有回复、计划、项目文档、注释说明和交付总结**；只有代码标识符、命令、日志原文、外部英文专名或用户明确要求时才使用英文。
+
 这是一份根据你提供的模板风格，结合你当前 ROSCAR1 实体小车项目（从提供的上下文和文档中提取）深度定制的 `CLAUDE.md`。
 
 这份文档保持了原模板“**权威、严格、防御性编程**”的基调，同时将 Web 前端的坑替换为了 ROS 1 实车调试中最致命的坑（如硬件串口混淆、环境变量丢失、同名节点互斥等）。
@@ -177,12 +179,12 @@ pkill -f ydlidar_ros_driver_node
 
 ### 7.1 开机自启与进程守护（systemd）
 
-**现状**：当前仍依赖人工 SSH 登录后，分别手动启动 `./start_sensors.sh` 和 `python3 server.py`。
+**现状**：仓库已提供 `systemd/ucar_sensors.service` 与 `systemd/ucar_web.service`，用于托管底盘/雷达和 Web 后端；如果小车系统尚未安装这两个 unit，仍会退化为人工 SSH 登录后分别手动启动 `./start_sensors.sh` 和 `python3 server.py`。
 
 **风险**：演示或运行过程中，一旦底盘节点、雷达节点或 Web 后端异常退出，整车能力会立即中断，恢复依赖人工重新登录处理。
 
 **规划要求**：
-- 为底层传感器启动链和 Web 服务分别编写 systemd 单元，例如：`/etc/systemd/system/ucar_sensors.service` 与 `/etc/systemd/system/ucar_web.service`。
+- 为底层传感器启动链和 Web 服务分别安装 systemd 单元：`/etc/systemd/system/ucar_sensors.service` 与 `/etc/systemd/system/ucar_web.service`。
 - 服务项必须显式配置 `Restart=always` 与合理的 `RestartSec=3`，避免进程崩溃后长期离线。
 - Web 服务与底层传感器服务应支持开机自启，使小车上电后即可进入可控状态。
 - 只要你修改了启动脚本、部署方式或网络入口，就必须同步评估是否应该把这部分迁移到 systemd，而不是继续依赖人工双终端启动。

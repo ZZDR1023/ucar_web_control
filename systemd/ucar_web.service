@@ -1,7 +1,7 @@
 [Unit]
 Description=UCAR Flask web control panel
-After=network-online.target
-Wants=network-online.target
+After=network-online.target ucar_sensors.service
+Wants=network-online.target ucar_sensors.service
 
 [Service]
 Type=simple

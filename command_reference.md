@@ -1358,33 +1358,46 @@ http://10.90.122.179:8080
 - 前方安全状态分两级：`caution=true` 只提示，`blocked=true` 才会取消导航并切回 Manual；当前急停阈值为 `0.35m`。
 - 顶部和 Status 卡片会显示 `/battery_state` 电量；低于 20% 变红，10 秒没有新数据会显示 `stale`，完全没有话题则显示 `Battery no data`。
 
-Web 服务推荐由 systemd 守护运行，避免手动启动后终端关闭或进程崩溃导致面板离线。仓库内单元文件：
+Web 服务推荐由 systemd 守护运行，避免手动启动后终端关闭或进程崩溃导致面板离线。底盘和雷达也可以交给独立的 sensors 服务管理，这样不用每次开 Web 前手动执行 `./start_sensors.sh`。
+
+仓库内单元文件：
 
 ```text
+systemd/ucar_sensors.service
 systemd/ucar_web.service
 ```
 
 首次安装到小车：
 
 ```bash
+sudo cp /tmp/ucar_sensors.service /etc/systemd/system/ucar_sensors.service
 sudo cp /tmp/ucar_web.service /etc/systemd/system/ucar_web.service
 sudo systemctl daemon-reload
-sudo systemctl enable ucar_web.service
-sudo systemctl restart ucar_web.service
+sudo systemctl enable ucar_sensors.service ucar_web.service
+sudo systemctl restart ucar_sensors.service ucar_web.service
 ```
 
 日常查看和重启：
 
 ```bash
+systemctl status ucar_sensors.service --no-pager
 systemctl status ucar_web.service --no-pager
+sudo systemctl restart ucar_sensors.service
 sudo systemctl restart ucar_web.service
 ```
+
+`ucar_web.service` 已配置 `Wants=ucar_sensors.service` 和 `After=ucar_sensors.service`。安装两个服务后，启动 Web 服务会同时拉起 sensors 服务；但它们仍是两个独立进程，排障时应分别看状态。
 
 如果手动运行 `python3 /home/ucar/web_panel/server.py` 报 `Address already in use`，通常说明 systemd 或旧 Flask 进程已经占用 8080。优先查看：
 
 ```bash
 systemctl status ucar_web.service --no-pager
 ```
+
+解决方法不是再开一个 `server.py`，而是二选一：
+
+- 使用 systemd：`sudo systemctl restart ucar_web.service`
+- 临时手动调试：先停服务 `sudo systemctl stop ucar_web.service`，再手动运行 `python3 server.py`
 
 ### 8. x11vnc 断线后的恢复
 

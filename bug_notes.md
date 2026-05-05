@@ -2574,3 +2574,98 @@ BLOCKED = 先移开障碍或调整目标
 CAUTION = 可以导航，但速度和路径会更保守
 CLEAR = 再检查 move_base/amcl/map_server 状态
 ```
+
+---
+
+## 44. Web、sensors 与 systemd 端口/启动关系
+
+### 问题
+
+用户希望打开 Web 面板时不要每次手动启动：
+
+```bash
+./start_sensors.sh
+python3 /home/ucar/web_panel/server.py
+```
+
+同时之前遇到过：
+
+```text
+OSError: [Errno 98] Address already in use
+```
+
+### 原因
+
+这是两个不同问题：
+
+1. `ucar_web.service` 只负责 Web 后端。如果只安装 Web 服务，它能解决 `server.py` 不用手动启动，但不会自动启动底盘和雷达。
+2. `Address already in use` 表示 8080 端口已经被占用，通常是 `ucar_web.service` 或旧的 Flask 进程已经在运行。此时再手动执行 `python3 server.py` 就会冲突。
+
+### 解决方法
+
+仓库新增：
+
+```text
+systemd/ucar_sensors.service
+```
+
+并修改：
+
+```text
+systemd/ucar_web.service
+```
+
+让 Web 服务声明：
+
+```text
+Wants=ucar_sensors.service
+After=ucar_sensors.service
+```
+
+正确安装两个服务后：
+
+- `ucar_sensors.service` 负责启动底盘和雷达，也就是替代手动 `./start_sensors.sh`；
+- `ucar_web.service` 负责启动 Web 后端，也就是替代手动 `python3 server.py`；
+- Web 服务启动时会尝试拉起 sensors 服务；
+- 日常只需要检查 systemd 服务状态，不要再额外开一个手动 Flask。
+
+安装或更新服务文件：
+
+```bash
+sudo cp /home/ucar/systemd/ucar_sensors.service /etc/systemd/system/ucar_sensors.service
+sudo cp /home/ucar/systemd/ucar_web.service /etc/systemd/system/ucar_web.service
+sudo systemctl daemon-reload
+sudo systemctl enable ucar_sensors.service ucar_web.service
+sudo systemctl restart ucar_sensors.service ucar_web.service
+```
+
+查看状态：
+
+```bash
+systemctl status ucar_sensors.service --no-pager
+systemctl status ucar_web.service --no-pager
+```
+
+### 以后如何避免/更好使用
+
+如果 Web 已经由 systemd 托管，不要再手动运行：
+
+```bash
+python3 /home/ucar/web_panel/server.py
+```
+
+否则会和 `ucar_web.service` 抢 8080 端口。
+
+如果确实要临时手动调试 Web 后端，先停掉 systemd 服务：
+
+```bash
+sudo systemctl stop ucar_web.service
+cd /home/ucar/web_panel
+python3 server.py
+```
+
+调试结束后恢复：
+
+```bash
+sudo systemctl restart ucar_web.service
+```
