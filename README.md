@@ -72,6 +72,21 @@ systemctl status ucar_web.service --no-pager
 └── package.xml                 # catkin 包描述
 ```
 
+### 为什么 `src/` 里只有一个 C++ 文件
+
+这个仓库不是传统“所有源码都放 `src/`”的单一 C++ 项目，而是按小车实际部署方式组织：
+
+- `src/line_follower.cpp`：唯一需要 catkin 编译的 C++ ROS 实验节点，所以放在 `src/`。
+- `web_panel/`：小车 Web 控制台的主要代码，部署到 `/home/ucar/web_panel/` 后由 Flask 运行。
+- 根目录 `start_*.sh`：小车 SSH 登录后直接执行的一键启动脚本，也会被 systemd 间接调用。
+- 根目录 `simple_line_follower.py`：不经过 Web 面板的极简 Python 巡线实验脚本，保留作对照实验。
+- `systemd/`：安装到 `/etc/systemd/system/` 的服务文件，用于守护底盘/雷达和 Web 后端。
+- `maps/`：导航用原始地图、封门地图和预览图。
+- `NOTES/`：调试记录、Bug 记录和命令速查，不是运行时代码。
+- `tests/`：本地回归测试和静态检查。
+
+因此 GitHub 上看起来“代码分散”是有意的：Python/Flask 文件按小车运行路径放，只有 C++ catkin 节点放 `src/`。
+
 ## 小车 ROS 环境
 
 小车系统：Ubuntu 18.04 + ROS 1 Melodic。

@@ -10,5 +10,8 @@ __pycache__/
 /patrol_captures/
 web_panel/patrol_captures/
 
+# Local planning notes.
+todo.md
+
 # Local editor/system backups.
 vscode_backup/code_*.deb
