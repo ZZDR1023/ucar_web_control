@@ -67,7 +67,8 @@ systemctl status ucar_web.service --no-pager
 ├── src/line_follower.cpp       # C++ 视觉巡线实验节点
 ├── simple_line_follower.py     # 极简 Python 视觉巡线实验脚本
 ├── tests/                      # Python/C++ 静态与行为回归测试
-├── NOTES/                      # 调试记录、Bug 记录、命令速查
+├── ROBOT_MANUAL.md             # 小车硬件、系统、设备路径和部署说明书
+├── NOTES/                      # 只保留 Bug 记录和命令速查
 ├── CMakeLists.txt              # catkin C++ 节点构建入口
 └── package.xml                 # catkin 包描述
 ```
@@ -82,7 +83,8 @@ systemctl status ucar_web.service --no-pager
 - 根目录 `simple_line_follower.py`：不经过 Web 面板的极简 Python 巡线实验脚本，保留作对照实验。
 - `systemd/`：安装到 `/etc/systemd/system/` 的服务文件，用于守护底盘/雷达和 Web 后端。
 - `maps/`：导航用原始地图、封门地图和预览图。
-- `NOTES/`：调试记录、Bug 记录和命令速查，不是运行时代码。
+- `ROBOT_MANUAL.md`：小车硬件、系统、设备路径、部署和安全说明书。
+- `NOTES/`：只保留 `bug_notes.md` 和 `command_reference.md` 两份核心文档。
 - `tests/`：本地回归测试和静态检查。
 
 因此 GitHub 上看起来“代码分散”是有意的：Python/Flask 文件按小车运行路径放，只有 C++ catkin 节点放 `src/`。
@@ -219,6 +221,7 @@ python3 -m pytest tests/test_person_follow_adapter.py tests/test_voice_control.p
 ## 重要文档
 
 - `CLAUDE.md`：AI/开发代理项目规则，包含实车安全铁律；
+- `ROBOT_MANUAL.md`：小车硬件、系统、设备路径、部署和安全说明书；
 - `NOTES/bug_notes.md`：已踩坑、根因和修复记录；
 - `NOTES/command_reference.md`：命令速查表；
 - `todo.md`：历史待办和阶段记录。
