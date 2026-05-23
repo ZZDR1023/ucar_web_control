@@ -7,9 +7,8 @@ Wants=network-online.target
 Type=simple
 User=ucar
 WorkingDirectory=/home/ucar
-Environment=ROS_MASTER_URI=http://10.90.122.179:11311
-Environment=ROS_IP=10.90.122.179
-ExecStart=/bin/bash -lc 'source /opt/ros/melodic/setup.bash && source /home/ucar/ucar_ws/devel/setup.bash && exec /home/ucar/start_sensors.sh'
+EnvironmentFile=-/home/ucar/roscar.env
+ExecStart=/bin/bash -lc 'ROBOT_IP="${ROBOT_IP:-$(hostname -I | awk '\''{print $1}'\'')}"; ROS_MASTER_URI="${ROS_MASTER_URI:-http://${ROBOT_IP}:11311}"; ROS_IP="${ROS_IP:-${ROBOT_IP}}"; source /opt/ros/melodic/setup.bash && source /home/ucar/ucar_ws/devel/setup.bash && export ROS_MASTER_URI ROS_IP && exec /home/ucar/start_sensors.sh'
 Restart=always
 RestartSec=3
 

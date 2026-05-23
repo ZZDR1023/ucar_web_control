@@ -2,8 +2,11 @@
 """Low-latency Flask web control panel for UCAR robot using rospy."""
 
 import io
+import json
 import math
 import os
+import signal
+import shlex
 import subprocess
 import threading
 import time
@@ -15,7 +18,7 @@ from actionlib_msgs.msg import GoalID
 from actionlib_msgs.msg import GoalStatusArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
-from sensor_msgs.msg import BatteryState, LaserScan
+from sensor_msgs.msg import BatteryState, Image, LaserScan
 
 try:
     from patrol import PatrolManager, safe_name
@@ -27,13 +30,23 @@ try:
 except ImportError:
     from web_panel.line_follow import LineFollowConfig, LineFollower, decode_jpeg, encode_jpeg
 
+try:
+    from line_record import LineFollowRecorder
+except ImportError:
+    from web_panel.line_record import LineFollowRecorder
+
+try:
+    from voice_control import build_route_point_aliases, odom_target_for_step, parse_voice_command
+except ImportError:
+    from web_panel.voice_control import build_route_point_aliases, odom_target_for_step, parse_voice_command
+
 app = Flask(__name__)
 
 MANUAL_MODE = True
 CURRENT_LINEAR_X = 0.0
 CURRENT_ANGULAR_Z = 0.0
 lock = threading.Lock()
-latest_odom = {"x": 0.0, "y": 0.0, "linear": 0.0, "angular": 0.0}
+latest_odom = {"x": 0.0, "y": 0.0, "yaw": 0.0, "linear": 0.0, "angular": 0.0, "stamp": 0.0}
 latest_pose = {"seen": False, "stamp": 0.0, "x": 0.0, "y": 0.0, "yaw": 0.0}
 latest_battery = {
     "seen": False,
@@ -74,8 +87,22 @@ last_goal_publish_time = 0.0
 auto_reissue_count = 0
 nav_tuning_applied = False
 latest_nav_tuning = {"ok": False, "detail": "not applied"}
+latest_person_follow = {"running": False, "pid": None, "detail": "未启动"}
+person_follow_probe = {"stamp": 0.0, "pid": None}
+person_follow_start_lock = threading.Lock()
+person_follow_start_generation = 0
 GOAL_REISSUE_DISTANCE = 0.12
 GOAL_REISSUE_INTERVAL = 2.0
+PERSON_FOLLOW_COMMAND = "python3 -u /home/ucar/web_panel/person_follow_adapter.py"
+PERSON_FOLLOW_STATUS_FILE = "/tmp/person_follow_adapter.json"
+PERSON_FOLLOW_USES_DIRECT_CAMERA = "person_follow_adapter.py" in PERSON_FOLLOW_COMMAND
+UCAR_CAMERA_COMMAND = (
+    "python3 -u /home/ucar/web_panel/ucar_camera_bridge.py "
+    "_device:=/dev/video0 _topic:=/ucar_camera/image_raw "
+    "_width:=1280 _height:=720 _rate:=10"
+)
+MAX_MANUAL_LINEAR_SPEED = 0.10
+MAX_MANUAL_ANGULAR_SPEED = 0.50
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MAP_PREVIEW_CANDIDATES = [
     os.path.abspath(os.path.join(BASE_DIR, "..", "maps", "ucar_map_20260501_202713_sealed_preview.png")),
@@ -112,13 +139,18 @@ PATROL_ROUTE_PATH = os.path.join(BASE_DIR, "patrol_route.json")
 PATROL_ROUTES_PATH = os.path.join(BASE_DIR, "patrol_routes.json")
 PATROL_RUNS_PATH = os.path.join(BASE_DIR, "patrol_runs.json")
 PATROL_CAPTURE_DIR = os.path.join(BASE_DIR, "patrol_captures")
+LINE_FOLLOW_RECORD_DIR = os.path.join(BASE_DIR, "line_follow_records")
 PATROL_REACHED_DISTANCE = 0.15
 PATROL_STATUS_REACHED_DISTANCE = 0.30
 PATROL_POINT_WAIT_SECONDS = 3.0
 patrol_manager = PatrolManager(PATROL_ROUTE_PATH, routes_path=PATROL_ROUTES_PATH, runs_path=PATROL_RUNS_PATH)
+line_follow_recorder = LineFollowRecorder(LINE_FOLLOW_RECORD_DIR)
 patrol_goal_publish_time = 0.0
+voice_sequence_cancel = threading.Event()
+voice_sequence_lock = threading.Lock()
+voice_sequence_running = False
 
-rospy.init_node("web_panel_server", anonymous=True, disable_signals=True)
+rospy.init_node("web_panel_server", anonymous=False, disable_signals=True)
 cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
 goal_pub = rospy.Publisher("/move_base_simple/goal", PoseStamped, queue_size=1)
 pose_pub = rospy.Publisher("/initialpose", PoseWithCovarianceStamped, queue_size=1)
@@ -126,11 +158,14 @@ cancel_pub = rospy.Publisher("/move_base/cancel", GoalID, queue_size=1)
 
 
 def odom_cb(msg):
+    q = msg.pose.pose.orientation
     with lock:
         latest_odom["x"] = msg.pose.pose.position.x
         latest_odom["y"] = msg.pose.pose.position.y
+        latest_odom["yaw"] = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         latest_odom["linear"] = msg.twist.twist.linear.x
         latest_odom["angular"] = msg.twist.twist.angular.z
+        latest_odom["stamp"] = time.time()
 
 
 rospy.Subscriber("/odom", Odometry, odom_cb)
@@ -165,12 +200,22 @@ def quat_to_yaw(q):
 
 
 def amcl_cb(msg):
+    global last_goal_publish_time
+    msg_to_publish = None
     with lock:
         latest_pose["seen"] = True
         latest_pose["stamp"] = time.time()
         latest_pose["x"] = msg.pose.pose.position.x
         latest_pose["y"] = msg.pose.pose.position.y
         latest_pose["yaw"] = quat_to_yaw(msg.pose.pose.orientation)
+        if (not MANUAL_MODE) and pending_goal is not None and time.time() - last_goal_publish_time > 1.0:
+            msg_to_publish = pending_goal
+    if msg_to_publish is not None:
+        for _ in range(3):
+            msg_to_publish.header.stamp = rospy.Time.now()
+            goal_pub.publish(msg_to_publish)
+            last_goal_publish_time = time.time()
+            time.sleep(0.05)
 
 
 def move_base_status_cb(msg):
@@ -295,7 +340,7 @@ def camera_loop():
             active = camera_clients > 0
         with line_follow_lock:
             line_follow_active = line_follow_config.enabled
-        active = active or line_follow_active
+        active = active or line_follow_active or line_follow_recorder.snapshot().get("active", False)
         if not active:
             if cap is not None:
                 cap.release()
@@ -304,7 +349,10 @@ def camera_loop():
             continue
         try:
             if cap is None or not cap.isOpened():
-                cap = cv2.VideoCapture("/dev/ucar_video")
+                cap = cv2.VideoCapture("/dev/ucar_video", cv2.CAP_V4L2)
+                if not cap.isOpened():
+                    cap = cv2.VideoCapture("/dev/ucar_video")
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc("M", "J", "P", "G"))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             ret, frame = cap.read()
@@ -327,6 +375,53 @@ def camera_loop():
 threading.Thread(target=camera_loop, daemon=True).start()
 
 
+def release_web_camera_for_person_follow():
+    global camera_clients
+    with camera_lock:
+        camera_clients = 0
+    with line_follow_lock:
+        line_follow_active = line_follow_config.enabled
+    recorder_active = line_follow_recorder.snapshot().get("active", False)
+    if line_follow_active or recorder_active:
+        disable_line_follow("启动人体跟随，释放摄像头")
+    if recorder_active:
+        line_follow_recorder.stop()
+    time.sleep(0.8)
+    hard_release_video_device_for_person_follow()
+
+
+def hard_release_video_device_for_person_follow():
+    current_pid = os.getpid()
+    command = (
+        "for pid in $(fuser /dev/video0 /dev/ucar_video 2>/dev/null); do "
+        "if [ \"$pid\" != \"{pid}\" ]; then kill -9 \"$pid\" || true; fi; "
+        "done; "
+        "pkill -9 -f '[u]car_camera.py|[u]car_camera_bridge.py|[u]car_camera' || true"
+    ).format(pid=current_pid)
+    run_shell(command, timeout=3)
+    time.sleep(1.5)
+
+
+def start_person_follow_camera_bridge():
+    run_shell("pkill -f '[u]car_camera_bridge.py|[u]car_camera.py|[u]car_camera' || true", timeout=3)
+    command = (
+        ros_shell_prefix() + "; "
+        "cd /home/ucar/web_panel; "
+        "nohup python3 -u /home/ucar/web_panel/ucar_camera_bridge.py "
+        "_device:=/dev/video0 _topic:=/ucar_camera/image_raw _width:=1280 _height:=720 _rate:=10 "
+        ">/tmp/ucar_camera_bridge.log 2>&1 < /dev/null & true"
+    )
+    run_shell(command, timeout=5)
+
+
+def stop_person_follow_camera_bridge():
+    run_shell("pkill -f '[u]car_camera_bridge.py' || true", timeout=3)
+
+
+def person_follow_camera_bridge_ready(max_age=1.5):
+    return wait_for_camera_message(timeout=1.5)
+
+
 def disable_line_follow(reason="已切换到其他控制"):
     global line_follow_config, latest_line_follow_control
     with line_follow_lock:
@@ -341,7 +436,27 @@ def line_follow_snapshot():
             "config": line_follow_config.to_dict(),
             "result": latest_line_follow_result.to_dict(),
             "control": dict(latest_line_follow_control),
+            "recording": line_follow_recorder.snapshot(),
         }
+
+
+def line_follow_record_metadata(camera_stamp):
+    with lock:
+        cmd = {"linear_x": CURRENT_LINEAR_X, "angular_z": CURRENT_ANGULAR_Z}
+        odom = dict(latest_odom)
+        pose = dict(latest_pose)
+    return {
+        "camera_stamp": camera_stamp,
+        "cmd": cmd,
+        "odom": odom,
+        "pose": pose,
+        "line_follow": {
+            "config": line_follow_config.to_dict(),
+            "result": latest_line_follow_result.to_dict(),
+            "control": dict(latest_line_follow_control),
+        },
+        "forward_obstacle": dict(latest_forward_obstacle),
+    }
 
 
 def process_line_follow_frame():
@@ -379,6 +494,9 @@ def process_line_follow_frame():
             "reason": latest_line_follow_result.message,
             "camera_stamp": camera_stamp,
         }
+        debug_jpeg = latest_line_follow_debug_jpeg
+        metadata = line_follow_record_metadata(camera_stamp)
+    line_follow_recorder.record_sample(frame_jpeg, debug_jpeg, metadata)
     return line_follow_snapshot()
 
 
@@ -403,12 +521,24 @@ def line_follow_loop():
         result = snapshot["result"]
         with lock:
             MANUAL_MODE = True
-            CURRENT_LINEAR_X = result["linear_x"] if result["detected"] else 0.0
-            CURRENT_ANGULAR_Z = result["angular_z"] if result["detected"] else 0.0
+            CURRENT_LINEAR_X = result["linear_x"]
+            CURRENT_ANGULAR_Z = result["angular_z"]
         time.sleep(LINE_FOLLOW_INTERVAL)
 
 
 threading.Thread(target=line_follow_loop, daemon=True).start()
+
+
+def line_follow_record_loop():
+    while not rospy.is_shutdown():
+        if line_follow_recorder.snapshot().get("active", False):
+            process_line_follow_frame()
+            time.sleep(0.25)
+        else:
+            time.sleep(0.2)
+
+
+threading.Thread(target=line_follow_record_loop, daemon=True).start()
 
 
 def cmd_loop():
@@ -419,7 +549,7 @@ def cmd_loop():
             manual_mode = MANUAL_MODE
             msg.linear.x = CURRENT_LINEAR_X
             msg.angular.z = CURRENT_ANGULAR_Z
-        if manual_mode:
+        if manual_mode and person_follow_process_running_cached() is None:
             try:
                 cmd_pub.publish(msg)
             except rospy.ROSException:
@@ -430,16 +560,347 @@ def cmd_loop():
 threading.Thread(target=cmd_loop, daemon=True).start()
 
 
+def ros_env_exports():
+    ros_master_uri = os.environ.get("ROS_MASTER_URI", "")
+    ros_ip = os.environ.get("ROS_IP", "")
+    parts = []
+    if ros_master_uri:
+        parts.append("export ROS_MASTER_URI={}".format(shlex.quote(ros_master_uri)))
+    if ros_ip:
+        parts.append("export ROS_IP={}".format(shlex.quote(ros_ip)))
+    return "; ".join(parts)
+
+
+def ros_shell_prefix(workspace="/home/ucar/ucar_ws/devel/setup.bash"):
+    parts = ["source /opt/ros/melodic/setup.bash"]
+    if workspace:
+        parts.append("source {}".format(shlex.quote(workspace)))
+    exports = ros_env_exports()
+    if exports:
+        parts.append(exports)
+    return "; ".join(parts)
+
+
 def run_shell(command, timeout=8):
+    process = None
     try:
-        result = subprocess.run(["bash", "-lc", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=timeout)
+        process = subprocess.Popen(
+            ["bash", "-lc", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            start_new_session=True,
+        )
+        stdout, stderr = process.communicate(timeout=timeout)
         return {
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
-            "returncode": result.returncode,
+            "stdout": stdout.strip(),
+            "stderr": stderr.strip(),
+            "returncode": process.returncode,
         }
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except Exception:
+                pass
+        return {"stdout": "", "stderr": "timeout", "returncode": 124}
     except Exception as exc:
         return {"stdout": "", "stderr": str(exc), "returncode": 1}
+
+
+def person_follow_process_running():
+    result = run_shell(
+        "pgrep -f '[p]erson_follow.py|[p]erson_follow_node|[p]erson_follow_adapter.py' | head -n 1",
+        timeout=3,
+    )
+    if result["returncode"] == 0 and result["stdout"].strip():
+        try:
+            return int(result["stdout"].splitlines()[0].strip())
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def person_follow_process_running_cached(max_age=2.0):
+    now = time.time()
+    with lock:
+        if now - person_follow_probe.get("stamp", 0.0) < max_age:
+            return person_follow_probe.get("pid")
+    pid = person_follow_process_running()
+    with lock:
+        person_follow_probe["stamp"] = now
+        person_follow_probe["pid"] = pid
+    return pid
+
+
+def ucar_camera_process_running():
+    result = run_shell(
+        "pgrep -f '[u]car_camera.py|[u]car_camera' | head -n 1",
+        timeout=3,
+    )
+    return result["returncode"] == 0 and bool(result["stdout"].strip())
+
+
+def start_ucar_camera_for_person_follow():
+    run_shell("pkill -f '[u]car_camera.py|[u]car_camera' || true", timeout=3)
+    start_person_follow_camera_bridge()
+
+
+def wait_for_ros_name(pattern, timeout=8.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = run_shell(
+            ros_shell_prefix() + "; "
+            "rostopic list 2>/dev/null | grep -E '{}' || true; "
+            "rosservice list 2>/dev/null | grep -E '{}' || true".format(pattern, pattern),
+            timeout=4,
+        )
+        if result["stdout"].strip():
+            return True
+        time.sleep(0.4)
+    return False
+
+
+def wait_for_camera_message(timeout=8.0):
+    try:
+        rospy.wait_for_message("/ucar_camera/image_raw", Image, timeout=timeout)
+        return True
+    except rospy.ROSException:
+        return False
+
+
+def wait_for_person_follow_ready(timeout=60.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not person_follow_process_running():
+            time.sleep(0.4)
+            continue
+        result = run_shell(
+            ros_shell_prefix() + "; "
+            "rosservice list 2>/dev/null | grep -q '^/person_follow/start_person_detect$' && "
+            "rosservice list 2>/dev/null | grep -q '^/person_follow/start_person_follow$'",
+            timeout=8,
+        )
+        if result["returncode"] == 0:
+            return True
+        time.sleep(1.0)
+    return False
+
+
+def wait_for_person_follow_stopped(timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not person_follow_process_running():
+            return True
+        time.sleep(0.2)
+    return person_follow_process_running() is None
+
+
+def start_person_follow_services(timeout=20.0, generation=None):
+    deadline = time.time() + timeout
+    details = []
+    while time.time() < deadline:
+        with lock:
+            if generation is not None and generation != person_follow_start_generation:
+                return False, "人体跟随启动已取消"
+        detect = run_shell(
+            ros_shell_prefix() + "; "
+            "rosservice call /person_follow/start_person_detect '{}'",
+            timeout=8,
+        )
+        follow = run_shell(
+            ros_shell_prefix() + "; "
+            "rosservice call /person_follow/start_person_follow '{}'",
+            timeout=8,
+        )
+        details = []
+        for label, result in (("detect", detect), ("follow", follow)):
+            text = (result["stdout"] or result["stderr"] or "").strip()
+            if text:
+                details.append("{}: {}".format(label, text.replace("\n", " ")[:160]))
+        adapter_status = person_follow_adapter_status()
+        follow_enabled = bool(adapter_status and adapter_status.get("follow_enabled"))
+        with lock:
+            canceled = generation is not None and generation != person_follow_start_generation
+        if canceled:
+            return False, "人体跟随启动已取消"
+        if follow["returncode"] == 0 and follow_enabled:
+            return True, "; ".join(details)
+        time.sleep(1.0)
+    return False, "; ".join(details)
+
+
+def person_follow_adapter_status():
+    try:
+        if not os.path.exists(PERSON_FOLLOW_STATUS_FILE):
+            return None
+        if time.time() - os.path.getmtime(PERSON_FOLLOW_STATUS_FILE) > 3.0:
+            return None
+        with open(PERSON_FOLLOW_STATUS_FILE, "r") as f:
+            return json.load(f)
+    except (IOError, OSError, ValueError):
+        return None
+
+
+def person_follow_snapshot():
+    pid = person_follow_process_running_cached()
+    adapter_status = person_follow_adapter_status()
+    with lock:
+        was_running = latest_person_follow.get("running")
+        latest_person_follow["running"] = pid is not None
+        latest_person_follow["pid"] = pid
+        if adapter_status and pid is not None:
+            latest_person_follow["detail"] = adapter_status.get("detail") or "运行中"
+            latest_person_follow["detected"] = bool(adapter_status.get("detected"))
+            latest_person_follow["target"] = adapter_status.get("target")
+            latest_person_follow["command"] = adapter_status.get("command")
+            latest_person_follow["lost_frames"] = adapter_status.get("lost_frames")
+        elif pid is not None and latest_person_follow.get("detail") in ("未启动", "已停止"):
+            latest_person_follow["detail"] = "运行中"
+        if pid is None and was_running:
+            latest_person_follow["detail"] = "已停止"
+        return dict(latest_person_follow)
+
+
+def stop_person_follow(reason="停止人体跟随", cancel_start=True, update_state=True):
+    global latest_person_follow, person_follow_start_generation
+    if cancel_start:
+        with lock:
+            person_follow_start_generation += 1
+    cmd_pub.publish(Twist())
+    run_shell("pkill -f '[p]erson_follow.py|[p]erson_follow_node|[p]erson_follow_adapter.py' || true", timeout=3)
+    stop_person_follow_camera_bridge()
+    if not update_state:
+        with lock:
+            person_follow_probe["stamp"] = time.time()
+            person_follow_probe["pid"] = None
+            return dict(latest_person_follow)
+    with lock:
+        latest_person_follow = {"running": False, "pid": None, "detail": reason}
+        person_follow_probe["stamp"] = time.time()
+        person_follow_probe["pid"] = None
+        return dict(latest_person_follow)
+
+
+def stop_person_follow_if_active(reason="停止人体跟随"):
+    with lock:
+        detail = latest_person_follow.get("detail") or ""
+        active = (
+            latest_person_follow.get("running")
+            or latest_person_follow.get("pid") is not None
+            or detail.startswith("启动中")
+        )
+        snapshot = dict(latest_person_follow)
+    if not active:
+        return snapshot
+    return stop_person_follow(reason)
+
+
+def person_follow_start_canceled(generation):
+    with lock:
+        return generation != person_follow_start_generation
+
+
+def start_person_follow_worker(generation):
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, latest_person_follow
+    if not person_follow_start_lock.acquire(False):
+        return
+    try:
+        disable_line_follow("启动人体跟随")
+        patrol_manager.stop("person follow started")
+        cancel_pub.publish(GoalID())
+        with lock:
+            MANUAL_MODE = True
+            CURRENT_LINEAR_X = 0.0
+            CURRENT_ANGULAR_Z = 0.0
+        cmd_pub.publish(Twist())
+        stop_person_follow("重启人体跟随", cancel_start=False, update_state=False)
+        wait_for_person_follow_stopped()
+        if person_follow_start_canceled(generation):
+            return
+        release_web_camera_for_person_follow()
+        if person_follow_start_canceled(generation):
+            return
+        camera_ready = True
+        if not PERSON_FOLLOW_USES_DIRECT_CAMERA:
+            start_ucar_camera_for_person_follow()
+            camera_ready = wait_for_camera_message(timeout=10.0)
+            if not camera_ready:
+                stop_person_follow_camera_bridge()
+                with lock:
+                    latest_person_follow = {
+                        "running": False,
+                        "pid": None,
+                        "detail": "相机话题 /ucar_camera/image_raw 未就绪，查看 /tmp/ucar_camera_bridge.log",
+                    }
+                    person_follow_probe["stamp"] = time.time()
+                    person_follow_probe["pid"] = None
+                return
+        if person_follow_start_canceled(generation):
+            return
+        command = (
+            ros_shell_prefix() + "; "
+            "nohup bash -lc 'exec {}' >/tmp/person_follow.log 2>&1 < /dev/null & true"
+        ).format(PERSON_FOLLOW_COMMAND)
+        result = run_shell(command, timeout=5)
+        if person_follow_start_canceled(generation):
+            stop_person_follow("人体跟随启动已取消", cancel_start=False)
+            return
+        ready = wait_for_person_follow_ready()
+        canceled = person_follow_start_canceled(generation)
+        service_ok = False
+        service_detail = ""
+        if ready and camera_ready and not canceled:
+            service_ok, service_detail = start_person_follow_services(generation=generation)
+        pid = person_follow_process_running()
+        canceled = person_follow_start_canceled(generation)
+        if canceled:
+            stop_person_follow("人体跟随启动已取消", cancel_start=False)
+            return
+        if pid is not None and ready and camera_ready and service_ok:
+            with lock:
+                MANUAL_MODE = False
+                CURRENT_LINEAR_X = 0.0
+                CURRENT_ANGULAR_Z = 0.0
+        with lock:
+            person_follow_probe["stamp"] = time.time()
+            person_follow_probe["pid"] = pid
+            latest_person_follow = {
+                "running": pid is not None,
+                "pid": pid,
+                "detail": (
+                    "运行中，已请求检测/跟随"
+                    if pid is not None and ready and camera_ready and service_ok
+                    else (
+                        "相机话题 /ucar_camera/image_raw 未就绪{}".format(
+                            "，查看 /tmp/ucar_camera_bridge.log"
+                        )
+                        if not camera_ready
+                        else (
+                            "人体跟随服务未就绪"
+                            if not ready
+                            else (service_detail or result["stderr"] or result["stdout"] or "启动失败，查看 /tmp/person_follow.log")
+                        )
+                    )
+                ),
+            }
+    finally:
+        person_follow_start_lock.release()
+
+
+def start_person_follow_async():
+    global person_follow_start_generation
+    with lock:
+        if latest_person_follow.get("detail") == "启动中，等待原厂人体跟随节点就绪":
+            return dict(latest_person_follow)
+        person_follow_start_generation += 1
+        generation = person_follow_start_generation
+        latest_person_follow.update({"running": False, "pid": None, "detail": "启动中，等待原厂人体跟随节点就绪"})
+        person_follow_probe["stamp"] = time.time()
+        person_follow_probe["pid"] = None
+        snapshot = dict(latest_person_follow)
+    threading.Thread(target=start_person_follow_worker, args=(generation,), daemon=True).start()
+    return snapshot
 
 
 def kill_nav_processes():
@@ -451,10 +912,7 @@ def kill_nav_processes():
 
 def nav_nodes_running():
     result = run_shell(
-        "source /opt/ros/melodic/setup.bash && "
-        "source /home/ucar/nav_clean_ws/devel/setup.bash && "
-        "export ROS_MASTER_URI=http://10.90.122.179:11311 && "
-        "export ROS_IP=10.90.122.179 && "
+        ros_shell_prefix("/home/ucar/nav_clean_ws/devel/setup.bash") + " && "
         "rosnode list 2>/dev/null | grep -E '^/(move_base|amcl|map_server)$' || true",
         timeout=6,
     )
@@ -464,11 +922,9 @@ def nav_nodes_running():
         if node not in listed:
             continue
         ping = run_shell(
-            "source /opt/ros/melodic/setup.bash && "
-            "export ROS_MASTER_URI=http://10.90.122.179:11311 && "
-            "export ROS_IP=10.90.122.179 && "
-            "rosnode ping -c 1 {} >/dev/null 2>&1".format(node),
-            timeout=4,
+            ros_shell_prefix(None) + " && "
+            "timeout 2 rosnode ping -c 1 {} >/dev/null 2>&1".format(node),
+            timeout=3,
         )
         if ping["returncode"] == 0:
             nodes.append(node)
@@ -483,10 +939,7 @@ def nav_nodes_running():
 def apply_nav_tuning():
     # Keep XY precision tighter, but relax final yaw to reduce in-place spinning.
     return run_shell(
-        "source /opt/ros/melodic/setup.bash && "
-        "source /home/ucar/nav_clean_ws/devel/setup.bash && "
-        "export ROS_MASTER_URI=http://10.90.122.179:11311 && "
-        "export ROS_IP=10.90.122.179 && "
+        ros_shell_prefix("/home/ucar/nav_clean_ws/devel/setup.bash") + " && "
         "rosparam set /move_base/DWAPlannerROS/xy_goal_tolerance 0.08 && "
         "rosparam set /move_base/DWAPlannerROS/yaw_goal_tolerance 0.35 && "
         "rosparam set /move_base/DWAPlannerROS/latch_xy_goal_tolerance true && "
@@ -526,11 +979,11 @@ threading.Thread(target=nav_state_loop, daemon=True).start()
 
 def start_nav_processes():
     return run_shell(
-        "source /opt/ros/melodic/setup.bash && "
-        "source /home/ucar/nav_clean_ws/devel/setup.bash && "
-        "export ROS_MASTER_URI=http://10.90.122.179:11311 && "
-        "export ROS_IP=10.90.122.179 && "
-        "nohup roslaunch nav_clean navigation_runtime.launch >/tmp/nav_restart.log 2>&1 &"
+        ros_shell_prefix("/home/ucar/nav_clean_ws/devel/setup.bash") + " && "
+        "timeout 3 bash -lc 'yes | rosnode cleanup >/tmp/rosnode_cleanup.log 2>&1' || true; "
+        "setsid -f bash -lc '" + ros_shell_prefix("/home/ucar/nav_clean_ws/devel/setup.bash") + "; "
+        "exec roslaunch nav_clean navigation_runtime.launch' "
+        ">/tmp/nav_restart.log 2>&1 < /dev/null; true"
     )
 
 
@@ -544,8 +997,10 @@ def start_nav_async():
     def worker():
         global nav_start_in_progress
         try:
-            start_nav_processes()
-            wait_for_nav_ready()
+            state = wait_for_nav_ready(timeout=1)
+            if not (state["move_base"] and state["amcl"] and state["map_server"]):
+                start_nav_processes()
+                wait_for_nav_ready()
             publish_pending_goal()
         finally:
             with lock:
@@ -615,13 +1070,38 @@ def set_navigation_goal_from_point(point):
         pending_goal = msg
         latest_goal = {"x": point["x"], "y": point["y"], "yaw": point["yaw"]}
     nav_ready = latest_nav_state["move_base"] and latest_nav_state["amcl"] and latest_nav_state["map_server"]
-    if nav_ready:
+    if nav_ready and amcl_pose_seen():
         publish_goal_msg(msg)
         patrol_goal_publish_time = time.time()
         return True
     start_nav_async()
     patrol_goal_publish_time = time.time()
     return False
+
+
+def voice_locations():
+    snapshot = patrol_manager.snapshot()
+    locations = []
+
+    def append_points(points, route_name="", include_generic=False):
+        for index, point in enumerate(points):
+            if not point.get("name"):
+                continue
+            aliases = []
+            if route_name:
+                aliases.extend(build_route_point_aliases(route_name, index, include_generic=include_generic))
+            locations.append({
+                "name": point.get("name", ""),
+                "aliases": aliases,
+                "x": point.get("x", 0.0),
+                "y": point.get("y", 0.0),
+                "yaw": point.get("yaw", 0.0),
+            })
+
+    append_points(snapshot.get("points", []), snapshot.get("current_route_name", ""), include_generic=True)
+    for route in snapshot.get("routes", []):
+        append_points(route.get("points", []), route.get("name", ""))
+    return locations
 
 
 def distance_to_patrol_point(point):
@@ -655,11 +1135,266 @@ def cancel_navigation_and_stop():
         time.sleep(0.03)
 
 
+def set_manual_velocity(linear_x, angular_z):
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
+    with lock:
+        MANUAL_MODE = True
+        CURRENT_LINEAR_X = max(-0.12, min(0.12, float(linear_x)))
+        CURRENT_ANGULAR_Z = max(-0.50, min(0.50, float(angular_z)))
+    msg = Twist()
+    msg.linear.x = CURRENT_LINEAR_X
+    msg.angular.z = CURRENT_ANGULAR_Z
+    cmd_pub.publish(msg)
+
+
+def stop_voice_motion():
+    set_manual_velocity(0.0, 0.0)
+    cancel_navigation_and_stop()
+
+
+def odom_snapshot():
+    with lock:
+        return dict(latest_odom)
+
+
+def amcl_pose_seen(max_age=5.0):
+    with lock:
+        pose = dict(latest_pose)
+    stamp = float(pose.get("stamp", 0.0) or 0.0)
+    return bool(pose.get("seen")) and stamp > 0.0 and time.time() - stamp <= max_age
+
+
+def normalize_angle(angle):
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    return angle
+
+
+def voice_motion_scales():
+    move_default = float(rospy.get_param("/voice_move_odom_scale", 1.0))
+    turn_default = float(rospy.get_param("/voice_turn_odom_scale", 1.0))
+    return {
+        "move": max(0.5, min(1.5, float(rospy.get_param("~voice_move_odom_scale", move_default)))),
+        "turn": max(0.5, min(1.6, float(rospy.get_param("~voice_turn_odom_scale", turn_default)))),
+    }
+
+
+def odom_is_fresh(snapshot, max_age=1.0):
+    stamp = float(snapshot.get("stamp", 0.0) or 0.0)
+    return stamp > 0.0 and time.time() - stamp <= max_age
+
+
+def calibrated_step_duration(step, linear_x, angular_z, scales):
+    target = odom_target_for_step(step, move_scale=scales["move"], turn_scale=scales["turn"])
+    if step.get("kind") == "move" and abs(linear_x) > 0.001:
+        return max(0.1, target.get("distance_m", 0.0) / abs(linear_x))
+    if step.get("kind") == "turn" and abs(angular_z) > 0.001:
+        return max(0.1, target.get("angle_rad", 0.0) / abs(angular_z))
+    return max(0.1, float(step.get("duration_s", 0.0) or 0.0))
+
+
+def voice_step_reached(step, start_odom):
+    current = odom_snapshot()
+    scales = voice_motion_scales()
+    target = odom_target_for_step(step, move_scale=scales["move"], turn_scale=scales["turn"])
+    if step.get("kind") == "move" and step.get("distance_m"):
+        distance = math.hypot(current.get("x", 0.0) - start_odom.get("x", 0.0), current.get("y", 0.0) - start_odom.get("y", 0.0))
+        return distance >= target.get("distance_m", float(step.get("distance_m", 0.0)))
+    if step.get("kind") == "turn" and step.get("angle_deg"):
+        angle = abs(normalize_angle(current.get("yaw", 0.0) - start_odom.get("yaw", 0.0)))
+        return angle >= target.get("angle_rad", math.radians(float(step.get("angle_deg", 0.0))))
+    return False
+
+
+def run_voice_sequence(command):
+    global voice_sequence_running
+    steps = command.get("steps", [])
+    try:
+        for step in steps:
+            if voice_sequence_cancel.is_set():
+                break
+            linear_x = max(-0.12, min(0.12, float(step.get("linear_x", 0.0))))
+            angular_z = max(-0.50, min(0.50, float(step.get("angular_z", 0.0))))
+            if latest_forward_obstacle.get("blocked") and linear_x > 0.0:
+                break
+            start_odom = odom_snapshot()
+            scales = voice_motion_scales()
+            duration_s = calibrated_step_duration(step, linear_x, angular_z, scales)
+            use_odom_feedback = odom_is_fresh(start_odom)
+            set_manual_velocity(linear_x, angular_z)
+            deadline = time.time() + (max(duration_s * 1.6, duration_s + 1.5) if use_odom_feedback else duration_s)
+            while time.time() < deadline and not rospy.is_shutdown():
+                if voice_sequence_cancel.is_set():
+                    break
+                if latest_forward_obstacle.get("blocked") and linear_x > 0.0:
+                    voice_sequence_cancel.set()
+                    break
+                if use_odom_feedback and voice_step_reached(step, start_odom):
+                    break
+                time.sleep(0.05)
+            set_manual_velocity(0.0, 0.0)
+            time.sleep(0.15)
+    finally:
+        stop_voice_motion()
+        with voice_sequence_lock:
+            voice_sequence_running = False
+
+
+def start_voice_sequence(command):
+    global voice_sequence_running
+    if latest_forward_obstacle.get("blocked") and any(step.get("linear_x", 0.0) > 0.0 for step in command.get("steps", [])):
+        command["ok"] = False
+        command["executed"] = False
+        command["message"] = "前方障碍触发，拒绝语音动作序列"
+        return command
+    disable_line_follow("语音动作序列")
+    cancel_pub.publish(GoalID())
+    voice_sequence_cancel.set()
+    time.sleep(0.1)
+    with voice_sequence_lock:
+        voice_sequence_running = True
+        voice_sequence_cancel.clear()
+    threading.Thread(target=run_voice_sequence, args=(command,), daemon=True).start()
+    command["executed"] = True
+    command["message"] = command.get("message") or "已启动语音动作序列"
+    return command
+
+
+def execute_voice_command(command):
+    global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal, latest_nav_state
+    action = command.get("action")
+    if action == "stop":
+        voice_sequence_cancel.set()
+        disable_line_follow("语音停止")
+        stop_person_follow("语音停止")
+        with lock:
+            MANUAL_MODE = True
+            CURRENT_LINEAR_X = 0.0
+            CURRENT_ANGULAR_Z = 0.0
+        cancel_navigation_and_stop()
+        command["executed"] = True
+        return command
+    if action == "sequence":
+        command["calibration"] = voice_motion_scales()
+        stop_person_follow("语音动作序列")
+        return start_voice_sequence(command)
+    if action == "cmd_vel":
+        voice_sequence_cancel.set()
+        if latest_forward_obstacle.get("blocked") and command.get("linear_x", 0.0) > 0.0:
+            command["ok"] = False
+            command["executed"] = False
+            command["message"] = "前方障碍触发，拒绝语音前进"
+            return command
+        disable_line_follow("语音手动控制")
+        stop_person_follow("语音手动控制")
+        with lock:
+            MANUAL_MODE = True
+            CURRENT_LINEAR_X = max(-0.12, min(0.12, float(command.get("linear_x", 0.0))))
+            CURRENT_ANGULAR_Z = max(-0.50, min(0.50, float(command.get("angular_z", 0.0))))
+        cancel_pub.publish(GoalID())
+        command["linear_x"] = CURRENT_LINEAR_X
+        command["angular_z"] = CURRENT_ANGULAR_Z
+        command["executed"] = True
+        return command
+    if action == "goal":
+        disable_line_follow("语音导航目标")
+        stop_person_follow("语音导航目标")
+        x = finite_float(command.get("x", 0.0))
+        y = finite_float(command.get("y", 0.0))
+        yaw = finite_float(command.get("yaw", 0.0))
+        msg = make_goal_msg(x, y, yaw)
+        with lock:
+            MANUAL_MODE = False
+            CURRENT_LINEAR_X = 0.0
+            CURRENT_ANGULAR_Z = 0.0
+            pending_goal = msg
+            latest_goal = {"x": x, "y": y, "yaw": yaw}
+        nav_ready = latest_nav_state["move_base"] and latest_nav_state["amcl"] and latest_nav_state["map_server"]
+        localized = amcl_pose_seen()
+        started_nav = False
+        if nav_ready and localized:
+            publish_goal_msg(msg)
+        else:
+            started_nav = start_nav_async()
+        target_name = command.get("target_name") or "目标点"
+        if nav_ready and localized:
+            command["message"] = "已发布导航目标：{}".format(target_name)
+        elif nav_ready and not localized:
+            command["message"] = "目标已排队，但尚未收到 AMCL 定位；请先在地图设置 AMCL 位姿：{}".format(target_name)
+        elif started_nav:
+            command["message"] = "导航未就绪，已保存目标并正在启动导航：{}".format(target_name)
+        else:
+            command["message"] = "导航正在启动或未就绪，目标已排队：{}".format(target_name)
+        command.update({"x": x, "y": y, "yaw": yaw, "nav_ready": nav_ready, "localized": localized, "started_nav": started_nav, "executed": True})
+        return command
+    if action == "patrol_start":
+        disable_line_follow("语音启动巡逻")
+        stop_person_follow("语音启动巡逻")
+        try:
+            point = patrol_manager.start(0)
+        except ValueError as exc:
+            command.update({"ok": False, "executed": False, "message": str(exc)})
+            return command
+        command["nav_ready"] = set_navigation_goal_from_point(point)
+        command["executed"] = True
+        return command
+    if action == "patrol_pause":
+        disable_line_follow("语音暂停巡逻")
+        stop_person_follow("语音暂停巡逻")
+        patrol_manager.pause("voice paused patrol")
+        with lock:
+            MANUAL_MODE = True
+            CURRENT_LINEAR_X = 0.0
+            CURRENT_ANGULAR_Z = 0.0
+        cancel_navigation_and_stop()
+        command["executed"] = True
+        return command
+    if action == "patrol_resume":
+        disable_line_follow("语音恢复巡逻")
+        stop_person_follow("语音恢复巡逻")
+        try:
+            point = patrol_manager.resume()
+        except ValueError as exc:
+            command.update({"ok": False, "executed": False, "message": str(exc)})
+            return command
+        command["nav_ready"] = set_navigation_goal_from_point(point)
+        command["executed"] = True
+        return command
+    if action == "patrol_stop":
+        disable_line_follow("语音停止巡逻")
+        stop_person_follow("语音停止巡逻")
+        patrol_manager.stop("voice stopped patrol")
+        with lock:
+            MANUAL_MODE = True
+            CURRENT_LINEAR_X = 0.0
+            CURRENT_ANGULAR_Z = 0.0
+        cancel_navigation_and_stop()
+        command["executed"] = True
+        return command
+    if action == "person_follow_start":
+        snapshot = start_person_follow_async()
+        command["ok"] = True
+        command["executed"] = True
+        command["person_follow"] = snapshot
+        command["message"] = snapshot.get("detail", "人体跟随启动中")
+        return command
+    if action == "person_follow_stop":
+        snapshot = stop_person_follow("语音停止人体跟随")
+        command["executed"] = True
+        command["person_follow"] = snapshot
+        command["message"] = "人体跟随已停止"
+        return command
+    command["executed"] = False
+    return command
+
+
 def goal_distance():
     with lock:
         goal = latest_goal
         pose = dict(latest_pose)
-    if not goal:
+    if not goal or not pose.get("seen"):
         return None
     return math.hypot(goal["x"] - pose["x"], goal["y"] - pose["y"])
 
@@ -820,6 +1555,7 @@ def api_status():
         "nav_state": latest_nav_state,
         "patrol": patrol_manager.snapshot(),
         "line_follow": line_follow_snapshot(),
+        "person_follow": person_follow_snapshot(),
     })
 
 
@@ -947,13 +1683,53 @@ def api_line_follow_stop():
     return jsonify({"ok": True, "line_follow": line_follow_snapshot()})
 
 
+@app.route("/api/line_follow/record/status")
+def api_line_follow_record_status():
+    return jsonify({"ok": True, "recording": line_follow_recorder.snapshot(), "line_follow": line_follow_snapshot()})
+
+
+@app.route("/api/line_follow/record/start", methods=["POST"])
+def api_line_follow_record_start():
+    data = request.json or {}
+    disable_line_follow("开始人工巡线样本记录")
+    session = line_follow_recorder.start(data.get("name") or "manual_line_follow", line_follow_config.to_dict())
+    process_line_follow_frame()
+    return jsonify({"ok": True, "recording": session, "line_follow": line_follow_snapshot()})
+
+
+@app.route("/api/line_follow/record/stop", methods=["POST"])
+def api_line_follow_record_stop():
+    session = line_follow_recorder.stop()
+    return jsonify({"ok": True, "recording": session, "line_follow": line_follow_snapshot()})
+
+
+@app.route("/api/person_follow/status")
+def api_person_follow_status():
+    return jsonify({"ok": True, "person_follow": person_follow_snapshot()})
+
+
+@app.route("/api/person_follow/start", methods=["POST"])
+def api_person_follow_start():
+    snapshot = start_person_follow_async()
+    return jsonify({"ok": True, "person_follow": snapshot})
+
+
+@app.route("/api/person_follow/stop", methods=["POST"])
+def api_person_follow_stop():
+    snapshot = stop_person_follow("用户停止人体跟随")
+    return jsonify({"ok": True, "person_follow": snapshot})
+
+
 @app.route("/api/cmd_vel", methods=["POST"])
 def api_cmd_vel():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
     disable_line_follow("手动方向控制接管")
+    stop_person_follow_if_active("手动方向控制接管")
     data = request.json or {}
-    lx = max(-0.5, min(0.5, float(data.get("linear_x", 0))))
-    az = max(-2.0, min(2.0, float(data.get("angular_z", 0))))
+    lx = max(-MAX_MANUAL_LINEAR_SPEED, min(MAX_MANUAL_LINEAR_SPEED, float(data.get("linear_x", 0))))
+    az = max(-MAX_MANUAL_ANGULAR_SPEED, min(MAX_MANUAL_ANGULAR_SPEED, float(data.get("angular_z", 0))))
+    if lx > 0.0 and latest_forward_obstacle.get("blocked"):
+        lx = 0.0
     with lock:
         MANUAL_MODE = True
         CURRENT_LINEAR_X = lx
@@ -970,6 +1746,7 @@ def api_cmd_vel():
 def api_manual_stop():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
     disable_line_follow("手动停止")
+    stop_person_follow_if_active("手动停止")
     with lock:
         MANUAL_MODE = True
         CURRENT_LINEAR_X = 0.0
@@ -983,6 +1760,7 @@ def api_manual_stop():
 def api_stop():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
     disable_line_follow("STOP 停止")
+    stop_person_follow("STOP 停止")
     with lock:
         MANUAL_MODE = True
         CURRENT_LINEAR_X = 0.0
@@ -995,10 +1773,22 @@ def api_stop():
     return jsonify({"ok": True, "manual_mode": MANUAL_MODE})
 
 
+@app.route("/api/voice_command", methods=["POST"])
+def api_voice_command():
+    data = request.json or {}
+    text = data.get("text", "")
+    command = parse_voice_command(text, locations=voice_locations())
+    if command.get("ok"):
+        command = execute_voice_command(command)
+    status = 200 if command.get("ok") else 400
+    return jsonify({"ok": bool(command.get("ok")), "voice": command, "patrol": patrol_manager.snapshot()}), status
+
+
 @app.route("/api/goal", methods=["POST"])
 def api_goal():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal, latest_nav_state
     disable_line_follow("发送导航目标")
+    stop_person_follow("发送导航目标")
     data = request.json or {}
     x = finite_float(data.get("x", 0))
     y = finite_float(data.get("y", 0))
@@ -1010,11 +1800,11 @@ def api_goal():
         CURRENT_ANGULAR_Z = 0.0
         pending_goal = msg
         latest_goal = {"x": x, "y": y, "yaw": yaw}
-    nav_state = nav_nodes_running()
-    latest_nav_state = nav_state
+    nav_state = latest_nav_state
     nav_ready = nav_state["move_base"] and nav_state["amcl"] and nav_state["map_server"]
+    localized = amcl_pose_seen()
     started_nav = False
-    if nav_ready:
+    if nav_ready and localized:
         publish_goal_msg(msg)
     else:
         started_nav = start_nav_async()
@@ -1026,6 +1816,7 @@ def api_goal():
         "manual_mode": MANUAL_MODE,
         "nav_state": nav_state,
         "nav_ready": nav_ready,
+        "localized": localized,
         "started_nav": started_nav,
     })
 
@@ -1034,6 +1825,7 @@ def api_goal():
 def api_set_pose():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, pending_goal, latest_goal
     disable_line_follow("设置 AMCL 位姿")
+    stop_person_follow("设置 AMCL 位姿")
     data = request.json or {}
     x = finite_float(data.get("x", 0))
     y = finite_float(data.get("y", 0))
@@ -1054,24 +1846,24 @@ def api_set_pose():
         0, 0, 0, 0, 0, 0.068,
     ]
     with lock:
-        MANUAL_MODE = True
+        keep_queued_goal = pending_goal is not None
+        MANUAL_MODE = not keep_queued_goal
         CURRENT_LINEAR_X = 0.0
         CURRENT_ANGULAR_Z = 0.0
-        pending_goal = None
-        latest_goal = None
     cancel_pub.publish(GoalID())
     cmd_pub.publish(Twist())
     for _ in range(3):
         msg.header.stamp = rospy.Time.now()
         pose_pub.publish(msg)
         time.sleep(0.05)
-    return jsonify({"ok": True, "x": x, "y": y, "yaw": yaw, "manual_mode": MANUAL_MODE})
+    return jsonify({"ok": True, "x": x, "y": y, "yaw": yaw, "manual_mode": MANUAL_MODE, "queued_goal": keep_queued_goal})
 
 
 @app.route("/api/takeover", methods=["POST"])
 def api_takeover():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
     disable_line_follow("手动接管")
+    stop_person_follow("手动接管")
     with lock:
         MANUAL_MODE = True
         CURRENT_LINEAR_X = 0.0
@@ -1085,6 +1877,7 @@ def api_takeover():
 def api_resume_nav():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z, latest_nav_state
     disable_line_follow("恢复导航")
+    stop_person_follow("恢复导航")
     with lock:
         MANUAL_MODE = False
         CURRENT_LINEAR_X = 0.0
@@ -1178,6 +1971,7 @@ def api_patrol_load():
 def api_patrol_start():
     data = request.json or {}
     disable_line_follow("启动巡逻")
+    stop_person_follow("启动巡逻")
     try:
         if data.get("route_name"):
             patrol_manager.load_named_route(data.get("route_name"))
@@ -1192,6 +1986,7 @@ def api_patrol_start():
 def api_patrol_pause():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
     disable_line_follow("暂停巡逻")
+    stop_person_follow("暂停巡逻")
     patrol_manager.pause("operator paused patrol")
     with lock:
         MANUAL_MODE = True
@@ -1205,6 +2000,7 @@ def api_patrol_pause():
 def api_patrol_resume():
     data = request.json or {}
     disable_line_follow("恢复巡逻")
+    stop_person_follow("恢复巡逻")
     try:
         if data.get("route_name") and not patrol_manager.snapshot()["points"]:
             patrol_manager.load_named_route(data.get("route_name"))
@@ -1219,6 +2015,7 @@ def api_patrol_resume():
 def api_patrol_stop():
     global MANUAL_MODE, CURRENT_LINEAR_X, CURRENT_ANGULAR_Z
     disable_line_follow("停止巡逻")
+    stop_person_follow("停止巡逻")
     patrol_manager.stop("operator stopped patrol")
     with lock:
         MANUAL_MODE = True

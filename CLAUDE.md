@@ -46,8 +46,8 @@
 ```bash
 source /opt/ros/melodic/setup.bash
 source ~/ucar_ws/devel/setup.bash
-export ROS_MASTER_URI=http://10.90.122.179:11311
-export ROS_IP=10.90.122.179
+export ROS_MASTER_URI=http://<小车当前 IP>:11311
+export ROS_IP=<小车当前 IP>
 ```
 **"我觉得它能连上" ≠ "它真能连上"**。如果 `rostopic list` 报 `Unable to communicate with master`，直接停止并检查网络与底盘脚本[cite: 1, 2]。
 
@@ -79,7 +79,7 @@ export ROS_IP=10.90.122.179
 | **测试运动 (`/cmd_vel`)** | 小车失控撞墙 | `rostopic pub` 必须带 `-r 20`（20Hz发布）并设置合适的限速（线速度 < 0.1, 角速度 < 0.6）[cite: 3]。禁止发布无频率的单次大速度。 |
 | **遇到 `move_base` 段错误 (`-11`)** | 导航底层崩溃 | 原厂工作空间的 `move_base` 被魔改了[cite: 1, 2]。不要强修！直接切换到干净的工作空间 `~/nav_clean_ws` 和 `./start_nav_clean.sh`[cite: 1, 2]。 |
 | **建图后启动自主导航** | 小车驶出门外导致失控 | 导航时加载的地图 **必须是封门版**（如 `..._sealed.yaml`）[cite: 1, 2]。 |
-| **打开 RViz 报错** | OpenGL 崩溃 (`System program problem`) | 禁止用纯 `ssh -Y` 跑 RViz[cite: 1]。必须执行 `export LIBGL_ALWAYS_SOFTWARE=1` 强制软件渲染，或使用 VNC (`10.90.122.179:5900`)[cite: 1, 2]。 |
+| **打开 RViz 报错** | OpenGL 崩溃 (`System program problem`) | 禁止用纯 `ssh -Y` 跑 RViz[cite: 1]。必须执行 `export LIBGL_ALWAYS_SOFTWARE=1` 强制软件渲染，或使用 VNC (`10.68.225.179:5900`)[cite: 1, 2]。 |
 | **Web 网页增加新 API** | 接管失败 / 按钮无反应 / 500 报错 | 修改 `web_panel/server.py` 后，检查 `import`[cite: 1]；前端增加防崩保护；确保 ROS 环境被注入后再启动 Flask[cite: 1]。 |
 
 ---
@@ -112,14 +112,14 @@ export ROS_IP=10.90.122.179
 ├── start_control.sh              # 一键启动：终端交互式控制[cite: 1, 2]
 ├── start_nav_clean.sh            # 一键启动：独立干净导航[cite: 1, 2]
 │
-└── bug_notes.md / command_reference.md / roslist.md  # 核心知识库文档[cite: 1, 2]
+└── bug_notes.md / command_reference.md / todo.md  # 核心知识库文档[cite: 1, 2]
 ```
 
 ### 新 agent 第一次进项目的动作
 
 1. 记住当前系统是 **ROS 1 Melodic** (Ubuntu 18.04)。**严禁输入任何 `ros2` 开头的命令**[cite: 1]。
 2. 读取 `bug_notes.md` 了解前人踩过的坑[cite: 1]。
-3. 执行任何操作前，确认小车 IP (`10.90.122.179`) 并在终端 `source` 环境[cite: 2, 3]。
+3. 执行任何操作前，实时确认小车当前 IP，并在终端 `source` 环境[cite: 2, 3]。
 
 ---
 
@@ -129,7 +129,7 @@ export ROS_IP=10.90.122.179
 
 **当前状态硬件与网络**：
 - 小车系统：Ubuntu 18.04 + ROS 1 Melodic[cite: 1, 3]。
-- 无线连接：RTL8821AE 网卡 (`wlan0`)，IP 固定为 `10.90.122.179`[cite: 2, 3]。
+- 无线连接：RTL8821AE 网卡 (`wlan0`)，IP 会随当前网络变化，操作前必须实时确认[cite: 2, 3]。
 - 外设：`/dev/ttyTHS1` (雷达)、`/dev/ttyUSB0` (底盘)、`/dev/video0` (相机)[cite: 1, 2]。
 
 **核心风险**（所有设计决策都要权衡）：
