@@ -1,6 +1,6 @@
-# ROSCAR1 小车说明书
+# XF-ROBOT-UCAR01 小车说明书
 
-本文档面向接手、部署和演示 ROSCAR1 小车的人，集中说明硬件、系统、设备路径、软件服务和安全边界。更细的故障记录见 `NOTES/bug_notes.md`，命令速查见 `NOTES/command_reference.md`。
+本文档面向接手、部署和演示 XF-ROBOT-UCAR01 小车的人，集中说明硬件、系统、设备路径、软件服务和安全边界。更细的故障记录见 `NOTES/bug_notes.md`，命令速查见 `NOTES/command_reference.md`。
 
 ## 1. 基本信息
 
